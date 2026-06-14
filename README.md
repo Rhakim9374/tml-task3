@@ -37,26 +37,37 @@ condor_submit cluster/train.sub \
 weights), evaluating clean and PGD-20 robust accuracy on a fixed 10% validation
 split every few epochs.
 
-## Sweep (20 parallel GPU jobs)
+## Sweep + finals (≈26 parallel GPU jobs)
 
-`cluster/launch_sweep.sh` submits **20 independent 1-GPU jobs** (each a separate
-`condor_submit`, so HTCondor spreads them across ~20 GPUs; wall-clock ~= one
-job). It is a coordinate search around a strong baseline plus a direct
-SGD-vs-SAM comparison, covering: optimizer (SGD/SAM), objective
+Two waves launched together, each job a separate `condor_submit` (1 GPU), so
+HTCondor spreads them across the cluster; wall-clock ≈ one job per wave.
+
+**Wave 1 — sweep (20 jobs, `EPOCHS=40`).** Coordinate search around a strong
+baseline + a direct SGD-vs-SAM comparison: optimizer (SGD/SAM), objective
 (TRADES/PGD-AT/MART), TRADES beta, EMA decay, weight decay, dropout, label
-smoothing, and Cutout.
+smoothing, Cutout. At 40 epochs the cosine schedule **anneal-completes inside a
+7–10 h window**, so these are decision-ready *and* submission-ready.
+
+**Wave 2 — finals (6 jobs, `EPOCHS=100`).** Longer runs of the a-priori
+strongest configs, as parallel upside on surplus GPUs.
 
 ```bash
-EPOCHS=50 bash cluster/launch_sweep.sh           # submits checkpoints/sweep_*.pt
-condor_q                                          # confirm jobs are Running, not Idle
-# after they finish, rank by validation unified score:
-~/.tml-venv/bin/python -m scripts.collect_sweep \
-    --glob "checkpoints/sweep_*.pt" --arch resnet50
+EPOCHS=40  bash cluster/launch_sweep.sh    # checkpoints/sweep_*.pt
+EPOCHS=100 bash cluster/launch_finals.sh   # checkpoints/final_*.pt
+condor_q                                    # confirm Running, not Idle; note epoch time
 ```
 
-Take the winning config and train it longer for the final submission. SAM jobs
-cost ~2x per epoch, so they finish later — `collect_sweep` just reads whatever
-checkpoints exist.
+Each job saves its **best-so-far** checkpoint every 5 epochs, so you can rank at
+any time — even mid-flight — without waiting for jobs to finish:
+
+```bash
+~/.tml-venv/bin/python -m scripts.collect_sweep \
+    --glob "checkpoints/sweep_*.pt" --arch resnet50      # or "checkpoints/*.pt"
+```
+
+> Timing: check the first epoch's printed wall-clock right after launch. If it's
+> far from ~1–3 min/epoch, `condor_rm` and relaunch with an `EPOCHS` that
+> anneal-finishes in your window (cosine LR must reach 0 for best robustness).
 
 ## Evaluate locally before submitting
 

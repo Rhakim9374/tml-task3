@@ -47,13 +47,24 @@ def main():
 
     rows = []
     for path in paths:
-        model.load_state_dict(torch.load(path, map_location=device), strict=True)
+        name = os.path.basename(path)
+        # Jobs may still be running and mid-write -- skip unreadable checkpoints
+        # so we can rank whatever has been saved so far.
+        try:
+            state = torch.load(path, map_location=device)
+            model.load_state_dict(state, strict=True)
+        except Exception as e:
+            print(f"  skip {name}: not readable yet ({type(e).__name__})", flush=True)
+            continue
         model.eval()
         clean = evaluate_clean(model, val_loader, device)
         robust = evaluate_robust(model, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.steps)
         score = unified_score(clean, robust)
-        rows.append((os.path.basename(path), clean, robust, score))
-        print(f"  scored {os.path.basename(path)}: clean={clean:.4f} robust={robust:.4f} score={score:.4f}", flush=True)
+        rows.append((name, clean, robust, score))
+        print(f"  scored {name}: clean={clean:.4f} robust={robust:.4f} score={score:.4f}", flush=True)
+
+    if not rows:
+        raise SystemExit("no readable checkpoints yet -- wait for the first evals to be saved")
 
     rows.sort(key=lambda r: r[3], reverse=True)
     print("\n=== ranked by unified score (PGD-{} eval, eps={:.4f}) ===".format(args.steps, args.eps))

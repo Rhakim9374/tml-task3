@@ -83,6 +83,7 @@ def main():
     if args.lr is None:  # per-optimizer default LR
         args.lr = 1e-3 if args.optimizer == "adamw" else 0.15
     torch.manual_seed(args.seed)
+    torch.backends.cudnn.benchmark = True  # fixed input size -> free conv autotuning speedup
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}  args={vars(args)}", flush=True)
 
