@@ -1,0 +1,23 @@
+# Interactive GPU job for analysis (ranking checkpoints, evaluating, submitting).
+# The login node must not run heavy compute, so launch a shell on a GPU worker:
+#
+#   condor_submit -i cluster/interactive.sub
+#
+# Then, inside the container:
+#   cd ~/code
+#   pip install -r requirements.txt
+#   python -m scripts.collect_sweep --glob "checkpoints/*.pt" --arch resnet50
+
+universe      = docker
+docker_image  = pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+
+request_GPUs   = 1
+request_CPUs   = 4
+request_memory = 16G
+
+should_transfer_files = YES
+requirements          = UidDomain == "cs.uni-saarland.de"
++WantGPUHomeMounted   = true
++WantScratchMounted   = true
+
+queue

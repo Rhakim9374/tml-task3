@@ -1,9 +1,7 @@
-"""L-infinity adversarial attacks used for both training and evaluation.
+"""L-infinity PGD attack (Madry et al.), used for training and evaluation.
 
-All attacks operate in the [0, 1] pixel space (the same space the model sees) so
-the epsilon budget is directly comparable to the conventional CIFAR setting of
-eps = 8/255. PGD here is the standard Madry attack; FGSM is its single-step,
-no-random-start special case.
+Operates in [0, 1] pixel space (the space the model sees), so the epsilon budget
+matches the conventional CIFAR setting of eps = 8/255.
 """
 
 import torch
@@ -40,8 +38,3 @@ def pgd_linf(
         x_adv = torch.min(torch.max(x_adv, x - eps), x + eps).clamp(0.0, 1.0)
 
     return x_adv.detach()
-
-
-def fgsm(model, x: torch.Tensor, y: torch.Tensor, eps: float) -> torch.Tensor:
-    """Single-step FGSM (no random start), as an attack-strength sanity check."""
-    return pgd_linf(model, x, y, eps=eps, alpha=eps, steps=1, random_start=False)

@@ -1,16 +1,10 @@
 """Model factory for the robustness task.
 
-The evaluation server reconstructs the model from the ``model-name`` field and
-our submitted state dict, building a *vanilla* torchvision ResNet with only the
-final ``fc`` layer replaced to output 9 classes (see the task template). We must
-therefore match that construction EXACTLY — in particular we keep the original
-7x7 stride-2 stem and maxpool. Modifying the stem (as is common for 32x32 CIFAR
-training) would change ``conv1.weight``'s shape and make ``load_state_dict`` on
-the server fail, getting the submission rejected.
-
-Inputs are plain pixels in [0, 1] (the template feeds ``images / 255``). We do
-NOT add a normalization layer because that would introduce extra state-dict keys
-the server's model does not have. Training therefore happens directly in [0, 1].
+The server rebuilds a vanilla torchvision ResNet with only ``fc`` swapped to 9
+classes, then loads our state dict. We must match that exactly: keep the stock
+7x7 stem and maxpool (a 32x32-style stem swap changes ``conv1.weight``'s shape
+and fails ``load_state_dict``), and add no normalization layer (it would add
+keys the server's model lacks). Inputs are plain pixels in [0, 1].
 """
 
 import types
@@ -30,16 +24,11 @@ ARCHS = {
 
 
 def make_model(arch: str = "resnet18", num_classes: int = NUM_CLASSES, dropout: float = 0.0) -> nn.Module:
-    """Build an allowed torchvision ResNet with the fc head swapped to ``num_classes``.
+    """Build an allowed torchvision ResNet with ``fc`` swapped to ``num_classes``.
 
-    Keeps the stock stem so the resulting state dict loads cleanly into the
-    server's identically-constructed model.
-
-    ``dropout`` > 0 inserts functional dropout immediately before ``fc`` as a
-    training-time regularizer. It is implemented functionally (``F.dropout``), so
-    it adds NO state-dict keys — the saved weights remain a drop-in for the
-    server's stock ResNet, where dropout is simply absent (and at eval, dropout
-    is identity anyway, so the two forward passes are identical).
+    ``dropout`` > 0 inserts functional dropout before ``fc``. Being functional it
+    adds no state-dict keys, so the weights stay a drop-in for the server's stock
+    ResNet (where dropout is absent, and identity at eval regardless).
     """
     if arch not in ARCHS:
         raise ValueError(f"arch must be one of {list(ARCHS)}, got {arch!r}")

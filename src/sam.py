@@ -1,17 +1,11 @@
 """Sharpness-Aware Minimization (SAM) and BN helpers.
 
-SAM (Foret et al. 2021) wraps a base optimizer and takes a two-step update: it
-first climbs to the worst-case point ``w + e(w)`` within a rho-ball, then applies
-the base optimizer's step using the gradient measured there. This biases training
-toward *flat* minima, which correlate with better generalization and, in the
-adversarial setting, improved robustness and less robust overfitting
-(Wei et al. 2023). The base optimizer is SGD-with-momentum here, so momentum is
-fully retained ("SAM with momentum").
-
-Cost: two forward/backward passes per step. The BN helpers below freeze running
-stats during the second pass so batch-norm isn't updated twice per step.
-
-Implementation follows the widely used reference (davda54/sam).
+SAM (Foret et al. 2021) wraps a base optimizer in a two-step update: climb to the
+worst-case point ``w + e(w)`` in a rho-ball, then step using the gradient there.
+This biases toward flat minima, which improve robustness and reduce robust
+overfitting (Wei et al. 2023). The base optimizer is SGD-with-momentum, so
+momentum is retained. Cost is two forward/backward passes per step; the BN
+helpers freeze running stats during the second pass to avoid double updates.
 """
 
 import torch

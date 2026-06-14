@@ -1,14 +1,9 @@
-"""Exponential moving average of model weights (a.k.a. weight averaging).
+"""Exponential moving average of model weights (weight averaging).
 
-Averaging weights over training is one of the most reliable ways to improve
-robust generalization and dampen robust overfitting (Gowal et al. 2020; Pang et
-al. "Bag of Tricks for Adversarial Training"). The averaged weights are plain
-tensors with identical keys to the live model, so the EMA state dict is a
-drop-in submission.
-
-We EMA every floating-point tensor in the state dict (parameters *and* BN
-running stats) so batch-norm statistics stay consistent with the averaged
-weights; integer buffers (e.g. ``num_batches_tracked``) are copied as-is.
+Averaging weights over training reliably improves robust generalization and
+dampens robust overfitting (Gowal et al. 2020). The shadow weights share the
+live model's keys, so the EMA state dict is a drop-in submission. We EMA every
+float tensor (params and BN running stats) and copy integer buffers as-is.
 """
 
 import torch
