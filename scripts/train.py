@@ -109,12 +109,14 @@ def main():
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # Weight averaging: maintain EMA weights. We evaluate BOTH the live model and
-    # the EMA model each time and keep whichever scores higher -- EMA generalizes
-    # better once it converges, but warms up slowly (chance-level early on short
-    # runs), so the live model is the safety net until then.
-    ema = EMA(model, args.ema_decay) if args.ema_decay and args.ema_decay > 0 else None
-    eval_model = make_model(args.arch).to(device) if ema is not None else None
+    # Weight averaging. We evaluate BOTH the live and EMA models each time and keep
+    # whichever scores higher. The EMA is started only AFTER warmup, snapshotted
+    # from the post-warmup weights: averaging in the chaotic random-init/warmup
+    # weights lands in a dead region of weight space (degenerate, constant-output
+    # model), so we anchor the average to already-sensible weights.
+    use_ema = bool(args.ema_decay and args.ema_decay > 0)
+    eval_model = make_model(args.arch).to(device) if use_ema else None
+    ema = None
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     best_score = -1.0
@@ -129,6 +131,10 @@ def main():
         scheduler.step()
         lr = scheduler.get_last_lr()[0]
         print(f"[epoch {epoch:3d}] loss={loss:.4f} train_acc={train_acc:.4f} lr={lr:.4f}", flush=True)
+
+        # Begin EMA accumulation once warmup is done (anchored to current weights).
+        if use_ema and ema is None and epoch >= warmup_epochs:
+            ema = EMA(model, args.ema_decay)
 
         is_last = epoch == args.epochs
         if epoch % args.eval_every == 0 or is_last:
