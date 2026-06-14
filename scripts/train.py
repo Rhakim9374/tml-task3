@@ -35,7 +35,9 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=None,
-                   help="peak LR; default 0.15 for sgd/sam, 1e-3 for adamw")
+                   help="peak LR; default 0.1 for sgd/sam, 1e-3 for adamw")
+    p.add_argument("--warmup", type=int, default=5,
+                   help="linear LR warmup epochs (resnet50 from scratch needs this to avoid NaN)")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4,
                    help="L2 weight decay (~5e-4 is near-optimal for AT; >1e-3 tends to hurt robustness)")
@@ -81,7 +83,7 @@ def build_optimizer(args, params):
 def main():
     args = parse_args()
     if args.lr is None:  # per-optimizer default LR
-        args.lr = 1e-3 if args.optimizer == "adamw" else 0.15
+        args.lr = 1e-3 if args.optimizer == "adamw" else 0.1
     torch.manual_seed(args.seed)
     torch.backends.cudnn.benchmark = True  # fixed input size -> free conv autotuning speedup
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,7 +96,18 @@ def main():
 
     model = make_model(args.arch, dropout=args.dropout).to(device)
     optimizer = build_optimizer(args, model.parameters())
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # Linear warmup then cosine anneal. Warmup is essential for resnet50 from
+    # scratch: a high peak LR on epoch 1 otherwise diverges to NaN.
+    warmup_epochs = min(args.warmup, max(0, args.epochs - 1))
+    if warmup_epochs > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, total_iters=warmup_epochs)
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs - warmup_epochs)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, [warmup, cosine], milestones=[warmup_epochs])
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # Weight averaging: maintain EMA weights and evaluate/submit those (they
     # generalize better and resist robust overfitting). The eval model holds
