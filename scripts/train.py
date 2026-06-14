@@ -109,11 +109,12 @@ def main():
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # Weight averaging: maintain EMA weights and evaluate/submit those (they
-    # generalize better and resist robust overfitting). The eval model holds
-    # whichever weights we score — EMA if enabled, else the live model's.
+    # Weight averaging: maintain EMA weights. We evaluate BOTH the live model and
+    # the EMA model each time and keep whichever scores higher -- EMA generalizes
+    # better once it converges, but warms up slowly (chance-level early on short
+    # runs), so the live model is the safety net until then.
     ema = EMA(model, args.ema_decay) if args.ema_decay and args.ema_decay > 0 else None
-    eval_model = make_model(args.arch).to(device) if ema is not None else model
+    eval_model = make_model(args.arch).to(device) if ema is not None else None
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     best_score = -1.0
@@ -131,22 +132,26 @@ def main():
 
         is_last = epoch == args.epochs
         if epoch % args.eval_every == 0 or is_last:
+            variants = {"live": model}
             if ema is not None:
                 ema.copy_to(eval_model)
-            clean = evaluate_clean(eval_model, val_loader, device)
-            robust = evaluate_robust(
-                eval_model, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.eval_steps
-            )
-            score = unified_score(clean, robust)
-            print(
-                f"    val: clean={clean:.4f} robust={robust:.4f} score={score:.4f}"
-                f"  (best={best_score:.4f})",
-                flush=True,
-            )
-            if score > best_score and clean > 0.50:  # respect the >50% clean gate
-                best_score = score
-                torch.save(eval_model.state_dict(), args.out)
-                print(f"    saved new best (score={score:.4f}) -> {args.out}", flush=True)
+                variants["ema"] = eval_model
+            for name, m in variants.items():
+                clean = evaluate_clean(m, val_loader, device)
+                robust = evaluate_robust(
+                    m, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.eval_steps
+                )
+                score = unified_score(clean, robust)
+                marker = ""
+                if clean > 0.50 and score > best_score:  # respect the >50% clean gate
+                    best_score = score
+                    torch.save(m.state_dict(), args.out)
+                    marker = "  *saved*"
+                print(
+                    f"    val[{name}]: clean={clean:.4f} robust={robust:.4f} score={score:.4f}{marker}",
+                    flush=True,
+                )
+            model.train()  # evaluate_* left the model in eval mode
 
     print(f"done. best unified score={best_score:.4f}  saved at {args.out}", flush=True)
 
