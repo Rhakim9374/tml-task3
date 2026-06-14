@@ -3,8 +3,8 @@
 #
 #   condor_submit -i cluster/interactive.sub
 #
-# Then, inside the container:
-#   cd ~/code
+# Then, inside the container (cd into wherever you cloned the repo):
+#   cd ~/tml-task3
 #   pip install -r requirements.txt
 #   python -m scripts.collect_sweep --glob "checkpoints/*.pt" --arch resnet50
 

@@ -11,13 +11,14 @@ accuracy must exceed 50% or the submission is rejected.
 
 ```bash
 ssh <atml_teamXXX>@conduit2.hpc.uni-saarland.de
-git clone <this-repo-url> code && cd code
+git clone <this-repo-url> && cd tml-task3
 bash cluster/fetch_data.sh          # downloads data/train.npz (~127 MB)
 ```
 
-GPU jobs install `requirements.txt` themselves inside the Docker image, so the
-login node needs no virtualenv. All compute (training and analysis) runs in
-HTCondor jobs.
+The repo can live in any directory — `train.sub` derives absolute paths from
+`$ENV(PWD)`, so always run `condor_submit` / the `launch_*.sh` scripts from the
+repo root. GPU jobs install `requirements.txt` themselves inside the Docker
+image, so the login node needs no virtualenv; all compute runs in HTCondor jobs.
 
 ## Sweep + finals (≈26 parallel GPU jobs)
 
@@ -54,7 +55,7 @@ Ranking and evaluation run PGD attacks, so do them on a GPU worker:
 ```bash
 condor_submit -i cluster/interactive.sub      # opens a shell on a GPU node
 # inside the container:
-cd ~/code && pip install -r requirements.txt
+cd ~/tml-task3 && pip install -r requirements.txt
 
 # rank all checkpoints by validation unified score (works mid-flight):
 python -m scripts.collect_sweep --glob "checkpoints/*.pt" --arch resnet50
