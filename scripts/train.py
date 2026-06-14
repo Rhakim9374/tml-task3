@@ -15,6 +15,7 @@ import os
 import torch
 
 from src.data import get_datasets, make_loader
+from src.ema import EMA
 from src.eval import evaluate_clean, evaluate_robust, unified_score
 from src.model import make_model
 from src.train import train_epoch
@@ -31,8 +32,19 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=0.1)
     p.add_argument("--momentum", type=float, default=0.9)
-    p.add_argument("--weight-decay", type=float, default=5e-4)
+    p.add_argument("--weight-decay", type=float, default=5e-4,
+                   help="L2 weight decay (~5e-4 is near-optimal for AT; >1e-3 tends to hurt robustness)")
     p.add_argument("--beta", type=float, default=6.0, help="TRADES robustness weight")
+
+    # Generalization knobs.
+    p.add_argument("--dropout", type=float, default=0.0,
+                   help="dropout prob before fc (0 disables; try 0.1-0.2)")
+    p.add_argument("--grad-clip", type=float, default=0.0,
+                   help="clip global grad norm (0 disables; try 1.0-5.0)")
+    p.add_argument("--label-smoothing", type=float, default=0.0,
+                   help="label smoothing on the outer loss (0 disables; keep <=0.1)")
+    p.add_argument("--ema-decay", type=float, default=0.999,
+                   help="EMA decay for weight averaging (0 disables; saved checkpoint uses EMA weights)")
 
     # Threat model (L-inf, pixel space [0,1]). 8/255 is the CIFAR standard.
     p.add_argument("--eps", type=float, default=8 / 255)
@@ -58,11 +70,17 @@ def main():
     val_loader = make_loader(val_ds, args.batch_size, shuffle=False, num_workers=args.workers)
     print(f"train={len(train_ds)}  val={len(val_ds)}", flush=True)
 
-    model = make_model(args.arch).to(device)
+    model = make_model(args.arch, dropout=args.dropout).to(device)
     optimizer = torch.optim.SGD(
         model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    # Weight averaging: maintain EMA weights and evaluate/submit those (they
+    # generalize better and resist robust overfitting). The eval model holds
+    # whichever weights we score — EMA if enabled, else the live model's.
+    ema = EMA(model, args.ema_decay) if args.ema_decay and args.ema_decay > 0 else None
+    eval_model = make_model(args.arch).to(device) if ema is not None else model
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     best_score = -1.0
@@ -72,6 +90,7 @@ def main():
             model, train_loader, optimizer, device,
             method=args.method, eps=args.eps, alpha=args.alpha,
             steps=args.steps, beta=args.beta,
+            grad_clip=args.grad_clip, label_smoothing=args.label_smoothing, ema=ema,
         )
         scheduler.step()
         lr = scheduler.get_last_lr()[0]
@@ -79,9 +98,11 @@ def main():
 
         is_last = epoch == args.epochs
         if epoch % args.eval_every == 0 or is_last:
-            clean = evaluate_clean(model, val_loader, device)
+            if ema is not None:
+                ema.copy_to(eval_model)
+            clean = evaluate_clean(eval_model, val_loader, device)
             robust = evaluate_robust(
-                model, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.eval_steps
+                eval_model, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.eval_steps
             )
             score = unified_score(clean, robust)
             print(
@@ -91,7 +112,7 @@ def main():
             )
             if score > best_score and clean > 0.50:  # respect the >50% clean gate
                 best_score = score
-                torch.save(model.state_dict(), args.out)
+                torch.save(eval_model.state_dict(), args.out)
                 print(f"    saved new best (score={score:.4f}) -> {args.out}", flush=True)
 
     print(f"done. best unified score={best_score:.4f}  saved at {args.out}", flush=True)

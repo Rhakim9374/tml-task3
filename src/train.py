@@ -17,15 +17,20 @@ from .attacks import pgd_linf
 from .data import augment
 
 
-def pgd_at_loss(model, x, y, eps, alpha, steps):
-    """Standard PGD adversarial training: cross-entropy on the adversarial input."""
+def pgd_at_loss(model, x, y, eps, alpha, steps, label_smoothing=0.0):
+    """Standard PGD adversarial training: cross-entropy on the adversarial input.
+
+    Label smoothing is applied only to this outer classification loss, never to
+    the inner attack (which keeps a sharp, un-smoothed CE so it still generates
+    strong adversaries).
+    """
     x_adv = pgd_linf(model, x, y, eps=eps, alpha=alpha, steps=steps, random_start=True)
     logits_adv = model(x_adv)
-    loss = F.cross_entropy(logits_adv, y)
+    loss = F.cross_entropy(logits_adv, y, label_smoothing=label_smoothing)
     return loss, logits_adv
 
 
-def trades_loss(model, x, y, eps, alpha, steps, beta):
+def trades_loss(model, x, y, eps, alpha, steps, beta, label_smoothing=0.0):
     """TRADES: CE on clean + beta * KL(p(x_adv) || p(x)).
 
     The inner maximization perturbs x to maximize the KL divergence from the
@@ -50,14 +55,21 @@ def trades_loss(model, x, y, eps, alpha, steps, beta):
     logits_clean = model(x)
     log_p_adv = F.log_softmax(model(x_adv.detach()), dim=1)
     p_clean = F.softmax(logits_clean, dim=1)
-    loss_natural = F.cross_entropy(logits_clean, y)
+    loss_natural = F.cross_entropy(logits_clean, y, label_smoothing=label_smoothing)
     loss_robust = F.kl_div(log_p_adv, p_clean, reduction="batchmean")
     loss = loss_natural + beta * loss_robust
     return loss, logits_clean
 
 
-def train_epoch(model, loader, optimizer, device, *, method, eps, alpha, steps, beta, use_aug=True):
-    """Run one training epoch. Returns (mean_loss, train_accuracy_on_used_logits)."""
+def train_epoch(
+    model, loader, optimizer, device, *, method, eps, alpha, steps, beta,
+    use_aug=True, grad_clip=0.0, label_smoothing=0.0, ema=None,
+):
+    """Run one training epoch. Returns (mean_loss, train_accuracy_on_used_logits).
+
+    ``grad_clip`` > 0 clips the global grad norm before each step; ``ema`` (an
+    :class:`src.ema.EMA`) is updated after every optimizer step.
+    """
     model.train()
     total_loss, total_correct, total = 0.0, 0, 0
 
@@ -68,14 +80,18 @@ def train_epoch(model, loader, optimizer, device, *, method, eps, alpha, steps, 
 
         optimizer.zero_grad(set_to_none=True)
         if method == "trades":
-            loss, logits = trades_loss(model, x, y, eps, alpha, steps, beta)
+            loss, logits = trades_loss(model, x, y, eps, alpha, steps, beta, label_smoothing)
         elif method == "pgd":
-            loss, logits = pgd_at_loss(model, x, y, eps, alpha, steps)
+            loss, logits = pgd_at_loss(model, x, y, eps, alpha, steps, label_smoothing)
         else:
             raise ValueError(f"unknown method {method!r} (expected 'pgd' or 'trades')")
 
         loss.backward()
+        if grad_clip and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
+        if ema is not None:
+            ema.update(model)
 
         total_loss += loss.item() * y.size(0)
         total_correct += (logits.argmax(1) == y).sum().item()
