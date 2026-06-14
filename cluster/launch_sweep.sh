@@ -19,7 +19,7 @@ CODE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 cd "$CODE_DIR"
 
 EPOCHS="${EPOCHS:-50}"
-COMMON="--arch resnet50 --method trades --beta 6.0 --epochs ${EPOCHS} --grad-clip 1.0"
+COMMON="--arch resnet50 --method trades --beta 6.0 --epochs ${EPOCHS} --optimizer sgd --grad-clip 5.0"
 
 # name | knob args (varied dimension in **bold** conceptually).
 # Baseline: ema 0.999, wd 5e-4, dropout 0.1, label-smoothing 0.1.

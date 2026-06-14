@@ -18,6 +18,7 @@ from src.data import get_datasets, make_loader
 from src.ema import EMA
 from src.eval import evaluate_clean, evaluate_robust, unified_score
 from src.model import make_model
+from src.sam import SAM
 from src.train import train_epoch
 
 
@@ -28,9 +29,13 @@ def parse_args():
     p.add_argument("--out", default="checkpoints/model.pt", help="where to save best state dict")
 
     p.add_argument("--method", default="trades", choices=["pgd", "trades"])
+    p.add_argument("--optimizer", default="sgd", choices=["sgd", "adamw", "sam"],
+                   help="sgd/sam use momentum; sam wraps sgd (2x cost); adamw needs a ~100x smaller lr")
+    p.add_argument("--rho", type=float, default=0.05, help="SAM neighborhood size")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--lr", type=float, default=0.1)
+    p.add_argument("--lr", type=float, default=None,
+                   help="peak LR; default 0.15 for sgd/sam, 1e-3 for adamw")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4,
                    help="L2 weight decay (~5e-4 is near-optimal for AT; >1e-3 tends to hurt robustness)")
@@ -39,8 +44,8 @@ def parse_args():
     # Generalization knobs.
     p.add_argument("--dropout", type=float, default=0.0,
                    help="dropout prob before fc (0 disables; try 0.1-0.2)")
-    p.add_argument("--grad-clip", type=float, default=1.0,
-                   help="clip global grad norm (on by default; 0 disables; raise to ~5.0 if it suppresses learning)")
+    p.add_argument("--grad-clip", type=float, default=5.0,
+                   help="clip global grad norm (on by default; 0 disables)")
     p.add_argument("--label-smoothing", type=float, default=0.0,
                    help="label smoothing on the outer loss (0 disables; keep <=0.1)")
     p.add_argument("--ema-decay", type=float, default=0.999,
@@ -59,8 +64,22 @@ def parse_args():
     return p.parse_args()
 
 
+def build_optimizer(args, params):
+    """Construct SGD / AdamW / SAM(SGD) from the parsed args."""
+    if args.optimizer == "sgd":
+        return torch.optim.SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    if args.optimizer == "adamw":
+        return torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    if args.optimizer == "sam":
+        return SAM(params, torch.optim.SGD, rho=args.rho,
+                   lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    raise ValueError(f"unknown optimizer {args.optimizer!r}")
+
+
 def main():
     args = parse_args()
+    if args.lr is None:  # per-optimizer default LR
+        args.lr = 1e-3 if args.optimizer == "adamw" else 0.15
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}  args={vars(args)}", flush=True)
@@ -71,9 +90,7 @@ def main():
     print(f"train={len(train_ds)}  val={len(val_ds)}", flush=True)
 
     model = make_model(args.arch, dropout=args.dropout).to(device)
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay
-    )
+    optimizer = build_optimizer(args, model.parameters())
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # Weight averaging: maintain EMA weights and evaluate/submit those (they
