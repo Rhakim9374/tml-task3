@@ -1,0 +1,36 @@
+# HTCondor submit file for one adversarial-training run.
+#
+# Pass training hyperparameters through the `args` macro, e.g.:
+#   condor_submit cluster/train.sub \
+#       -append "args=--arch resnet18 --method trades --beta 6.0 --epochs 60 \
+#                     --out checkpoints/resnet18_trades.pt" \
+#       -append "tag=trades_b6"
+#
+# Defaults below run a single resnet18 TRADES job.
+
+universe      = docker
+docker_image  = pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
+executable    = /bin/bash
+
+# --- Override per submission --------------------------------------------------
+args = --arch resnet18 --method trades --beta 6.0 --epochs 60 --out checkpoints/resnet18_trades.pt
+tag  = train
+
+arguments = /home/$ENV(USER)/code/cluster/run_train.sh $(args)
+
+output = /home/$ENV(USER)/code/runlogs/$(tag).$(ClusterId).$(ProcId).out
+error  = /home/$ENV(USER)/code/runlogs/$(tag).$(ClusterId).$(ProcId).err
+log    = /home/$ENV(USER)/code/runlogs/$(tag).$(ClusterId).log
+
+# --- Resources ----------------------------------------------------------------
+request_GPUs   = 1
+request_CPUs   = 4
+request_memory = 16G
+
+# --- Cluster-prescribed: do not change ----------------------------------------
+should_transfer_files = YES
+requirements          = UidDomain == "cs.uni-saarland.de"
++WantGPUHomeMounted   = true
++WantScratchMounted   = true
+
+queue 1

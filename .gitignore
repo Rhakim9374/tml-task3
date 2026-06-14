@@ -1,0 +1,34 @@
+# Claude Code local state
+.claude/
+
+# Class materials — not needed at runtime, not committed
+ProjectDescriptions/
+
+# Reference copies pulled from HuggingFace (kept locally for convenience)
+reference/
+
+# Dataset (127 MB) — fetched from HuggingFace, never committed
+data/
+*.npz
+
+# Pipeline outputs
+checkpoints/
+submissions/
+runlogs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# OS / editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
