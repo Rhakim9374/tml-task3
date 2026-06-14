@@ -24,17 +24,21 @@ from .sam import SAM, disable_running_stats, enable_running_stats
 
 
 def trades_attack(model, x, eps, alpha, steps):
-    """Inner TRADES maximization: perturb x to maximize KL(p(x_adv) || p(x))."""
+    """Inner TRADES maximization: perturb x to maximize KL(p(x_adv) || p(x)).
+
+    KL is computed in log-space (``log_target=True``) so confident clean logits
+    don't underflow softmax to zero and produce non-finite gradients.
+    """
     was_training = model.training
     model.eval()  # keep BN stats fixed during the attack
-    p_clean = F.softmax(model(x).detach(), dim=1)
+    log_p_clean = F.log_softmax(model(x).detach(), dim=1)
 
     x_adv = x.clone().detach() + 0.001 * torch.randn_like(x)
     x_adv = x_adv.clamp(0.0, 1.0)
     for _ in range(steps):
         x_adv.requires_grad_(True)
         log_p_adv = F.log_softmax(model(x_adv), dim=1)
-        kl = F.kl_div(log_p_adv, p_clean, reduction="batchmean")
+        kl = F.kl_div(log_p_adv, log_p_clean, reduction="batchmean", log_target=True)
         (grad,) = torch.autograd.grad(kl, x_adv)
         x_adv = x_adv.detach() + alpha * grad.sign()
         x_adv = torch.min(torch.max(x_adv, x - eps), x + eps).clamp(0.0, 1.0)
@@ -76,26 +80,30 @@ def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
         def closure():
             logits_clean = model(x)
             logits_adv = model(x_adv)
-            adv_probs = F.softmax(logits_adv, dim=1)
+            log_adv = F.log_softmax(logits_adv, dim=1)
+            log_nat = F.log_softmax(logits_clean, dim=1)
+            adv_probs = log_adv.exp()
             top2 = torch.argsort(adv_probs, dim=1)[:, -2:]
             new_y = torch.where(top2[:, -1] == y, top2[:, -2], top2[:, -1])
             loss_adv = F.cross_entropy(logits_adv, y, label_smoothing=label_smoothing) \
-                + F.nll_loss(torch.log(1.0001 - adv_probs + 1e-12), new_y)
-            nat_probs = F.softmax(logits_clean, dim=1)
-            true_probs = nat_probs.gather(1, y.unsqueeze(1)).squeeze(1)
-            kl = F.kl_div(torch.log(adv_probs + 1e-12), nat_probs, reduction="none").sum(1)
+                + F.nll_loss(torch.log(torch.clamp(1.0001 - adv_probs, min=1e-12)), new_y)
+            true_probs = log_nat.exp().gather(1, y.unsqueeze(1)).squeeze(1)
+            kl = F.kl_div(log_adv, log_nat, reduction="none", log_target=True).sum(1)
             loss_robust = (kl * (1.0000001 - true_probs)).mean()
             loss = loss_adv + beta * loss_robust
             return loss, logits_adv
         return closure
 
-    # TRADES: CE(clean) + beta * KL(p(x_adv) || p(x)), both terms differentiable.
+    # TRADES: CE(clean) + beta * KL(p(x_adv) || p(x)). The KL is done in log-space
+    # (log_target=True) so a confident clean softmax can't underflow to zero and
+    # send the backward to NaN -- the failure mode of the raw-softmax target on
+    # our un-normalized [0,1] inputs.
     def closure():
         logits_clean = model(x)
         log_p_adv = F.log_softmax(model(x_adv), dim=1)
-        p_clean = F.softmax(logits_clean, dim=1)
+        log_p_clean = F.log_softmax(logits_clean, dim=1)
         loss = F.cross_entropy(logits_clean, y, label_smoothing=label_smoothing) \
-            + beta * F.kl_div(log_p_adv, p_clean, reduction="batchmean")
+            + beta * F.kl_div(log_p_adv, log_p_clean, reduction="batchmean", log_target=True)
         return loss, logits_clean
     return closure
 
