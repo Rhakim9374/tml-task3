@@ -24,7 +24,7 @@ from src.train import train_epoch
 def parse_args():
     p = argparse.ArgumentParser(description="Adversarial training for the robustness task")
     p.add_argument("--data", default="data/train.npz", help="path to train.npz")
-    p.add_argument("--arch", default="resnet18", choices=["resnet18", "resnet34", "resnet50"])
+    p.add_argument("--arch", default="resnet50", choices=["resnet18", "resnet34", "resnet50"])
     p.add_argument("--out", default="checkpoints/model.pt", help="where to save best state dict")
 
     p.add_argument("--method", default="trades", choices=["pgd", "trades"])
@@ -39,8 +39,8 @@ def parse_args():
     # Generalization knobs.
     p.add_argument("--dropout", type=float, default=0.0,
                    help="dropout prob before fc (0 disables; try 0.1-0.2)")
-    p.add_argument("--grad-clip", type=float, default=0.0,
-                   help="clip global grad norm (0 disables; try 1.0-5.0)")
+    p.add_argument("--grad-clip", type=float, default=1.0,
+                   help="clip global grad norm (on by default; 0 disables; raise to ~5.0 if it suppresses learning)")
     p.add_argument("--label-smoothing", type=float, default=0.0,
                    help="label smoothing on the outer loss (0 disables; keep <=0.1)")
     p.add_argument("--ema-decay", type=float, default=0.999,

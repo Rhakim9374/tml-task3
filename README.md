@@ -21,15 +21,35 @@ bash cluster/fetch_data.sh          # downloads data/train.npz (~127 MB)
 
 ## Train (GPU job)
 
+Fixed choices: **resnet50** (capacity helps robustness), **TRADES**, EMA weight
+averaging and gradient clipping always on. A single run:
+
 ```bash
 condor_submit cluster/train.sub \
-    -append "args=--arch resnet18 --method trades --beta 6.0 --epochs 60 \
-                  --out checkpoints/resnet18_trades.pt" \
+    -append "args=--arch resnet50 --method trades --beta 6.0 --epochs 60 \
+                  --grad-clip 1.0 --ema-decay 0.999 --weight-decay 5e-4 \
+                  --dropout 0.1 --label-smoothing 0.1 \
+                  --out checkpoints/resnet50_trades.pt" \
     -append "tag=trades_b6"
 ```
 
-`scripts/train.py` saves the best-by-unified-score state dict, evaluating clean
-and PGD-20 robust accuracy on a fixed 10% validation split every few epochs.
+`scripts/train.py` saves the best-by-unified-score state dict (the **EMA**
+weights), evaluating clean and PGD-20 robust accuracy on a fixed 10% validation
+split every few epochs.
+
+## Regularization sweep
+
+Coordinate sweep (9 jobs) over EMA decay, weight decay, dropout, and label
+smoothing around a strong baseline, then rank by validation unified score:
+
+```bash
+EPOCHS=50 bash cluster/launch_sweep.sh           # submits checkpoints/sweep_*.pt
+# wait for jobs to finish (condor_q), then:
+~/.tml-venv/bin/python -m scripts.collect_sweep \
+    --glob "checkpoints/sweep_*.pt" --arch resnet50
+```
+
+Take the winning config and train it longer for the final submission.
 
 ## Evaluate locally before submitting
 

@@ -13,7 +13,7 @@ docker_image  = pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
 executable    = /bin/bash
 
 # --- Override per submission --------------------------------------------------
-args = --arch resnet18 --method trades --beta 6.0 --epochs 60 --out checkpoints/resnet18_trades.pt
+args = --arch resnet50 --method trades --beta 6.0 --epochs 60 --grad-clip 1.0 --out checkpoints/resnet50_trades.pt
 tag  = train
 
 arguments = /home/$ENV(USER)/code/cluster/run_train.sh $(args)

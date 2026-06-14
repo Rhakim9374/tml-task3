@@ -18,7 +18,7 @@ from src.model import make_model
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate a checkpoint's clean/robust accuracy")
     p.add_argument("--ckpt", required=True, help="path to a state-dict .pt file")
-    p.add_argument("--arch", default="resnet18", choices=["resnet18", "resnet34", "resnet50"])
+    p.add_argument("--arch", default="resnet50", choices=["resnet18", "resnet34", "resnet50"])
     p.add_argument("--data", default="data/train.npz")
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
