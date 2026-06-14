@@ -80,6 +80,34 @@ def build_optimizer(args, params):
     raise ValueError(f"unknown optimizer {args.optimizer!r}")
 
 
+@torch.no_grad()
+def recompute_bn(model, loader, device, max_batches=50):
+    """Recompute BatchNorm running stats for averaged (EMA) weights.
+
+    Averaging weights breaks BN: the running mean/var carried in the EMA shadow
+    do not correspond to the averaged weights (BN stats are nonlinear in the
+    weights), which makes the EMA model collapse to constant outputs. We reset
+    the stats and re-estimate them with a forward pass over clean training images
+    (SWA-style), matching the clean distribution the model is evaluated on.
+    """
+    bns = [m for m in model.modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)]
+    if not bns:
+        return
+    saved_momentum = {}
+    for bn in bns:
+        bn.reset_running_stats()
+        saved_momentum[bn] = bn.momentum
+        bn.momentum = None  # cumulative moving average over the passes
+    model.train()
+    for i, (x, _) in enumerate(loader):
+        if i >= max_batches:
+            break
+        model(x.to(device, non_blocking=True))
+    for bn in bns:
+        bn.momentum = saved_momentum[bn]
+    model.eval()
+
+
 def main():
     args = parse_args()
     if args.lr is None:  # per-optimizer default LR
@@ -141,6 +169,7 @@ def main():
             variants = {"live": model}
             if ema is not None:
                 ema.copy_to(eval_model)
+                recompute_bn(eval_model, train_loader, device)  # fix BN stats for averaged weights
                 variants["ema"] = eval_model
             for name, m in variants.items():
                 clean = evaluate_clean(m, val_loader, device)
