@@ -28,7 +28,7 @@ def parse_args():
     p.add_argument("--arch", default="resnet50", choices=["resnet18", "resnet34", "resnet50"])
     p.add_argument("--out", default="checkpoints/model.pt", help="where to save best state dict")
 
-    p.add_argument("--method", default="trades", choices=["pgd", "trades"])
+    p.add_argument("--method", default="trades", choices=["pgd", "trades", "mart"])
     p.add_argument("--optimizer", default="sgd", choices=["sgd", "adamw", "sam"],
                    help="sgd/sam use momentum; sam wraps sgd (2x cost); adamw needs a ~100x smaller lr")
     p.add_argument("--rho", type=float, default=0.05, help="SAM neighborhood size")
@@ -44,6 +44,8 @@ def parse_args():
     # Generalization knobs.
     p.add_argument("--dropout", type=float, default=0.0,
                    help="dropout prob before fc (0 disables; try 0.1-0.2)")
+    p.add_argument("--cutout", type=int, default=0,
+                   help="Cutout square size in px (0 disables; try 8-16; pairs with EMA)")
     p.add_argument("--grad-clip", type=float, default=5.0,
                    help="clip global grad norm (on by default; 0 disables)")
     p.add_argument("--label-smoothing", type=float, default=0.0,
@@ -106,7 +108,7 @@ def main():
         loss, train_acc = train_epoch(
             model, train_loader, optimizer, device,
             method=args.method, eps=args.eps, alpha=args.alpha,
-            steps=args.steps, beta=args.beta,
+            steps=args.steps, beta=args.beta, cutout=args.cutout,
             grad_clip=args.grad_clip, label_smoothing=args.label_smoothing, ema=ema,
         )
         scheduler.step()

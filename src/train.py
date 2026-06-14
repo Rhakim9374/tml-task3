@@ -45,12 +45,15 @@ def trades_attack(model, x, eps, alpha, steps):
 
 
 def make_adv(model, x, y, *, method, eps, alpha, steps):
-    """Generate the adversarial batch for one step at the current weights."""
-    if method == "pgd":
+    """Generate the adversarial batch for one step at the current weights.
+
+    PGD-AT and MART use a CE-based PGD attack; TRADES uses its KL-based attack.
+    """
+    if method in ("pgd", "mart"):
         return pgd_linf(model, x, y, eps=eps, alpha=alpha, steps=steps, random_start=True)
     if method == "trades":
         return trades_attack(model, x, eps, alpha, steps)
-    raise ValueError(f"unknown method {method!r} (expected 'pgd' or 'trades')")
+    raise ValueError(f"unknown method {method!r} (expected 'pgd', 'trades', or 'mart')")
 
 
 def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
@@ -66,6 +69,26 @@ def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
             return loss, logits
         return closure
 
+    if method == "mart":
+        # MART (Wang et al. 2020): a misclassification-aware variant. The CE term
+        # is boosted by the margin to the most-confident wrong class, and the KL
+        # regularizer is up-weighted on examples the clean model is unsure about.
+        def closure():
+            logits_clean = model(x)
+            logits_adv = model(x_adv)
+            adv_probs = F.softmax(logits_adv, dim=1)
+            top2 = torch.argsort(adv_probs, dim=1)[:, -2:]
+            new_y = torch.where(top2[:, -1] == y, top2[:, -2], top2[:, -1])
+            loss_adv = F.cross_entropy(logits_adv, y, label_smoothing=label_smoothing) \
+                + F.nll_loss(torch.log(1.0001 - adv_probs + 1e-12), new_y)
+            nat_probs = F.softmax(logits_clean, dim=1)
+            true_probs = nat_probs.gather(1, y.unsqueeze(1)).squeeze(1)
+            kl = F.kl_div(torch.log(adv_probs + 1e-12), nat_probs, reduction="none").sum(1)
+            loss_robust = (kl * (1.0000001 - true_probs)).mean()
+            loss = loss_adv + beta * loss_robust
+            return loss, logits_adv
+        return closure
+
     # TRADES: CE(clean) + beta * KL(p(x_adv) || p(x)), both terms differentiable.
     def closure():
         logits_clean = model(x)
@@ -79,12 +102,13 @@ def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
 
 def train_epoch(
     model, loader, optimizer, device, *, method, eps, alpha, steps, beta,
-    use_aug=True, grad_clip=0.0, label_smoothing=0.0, ema=None,
+    use_aug=True, cutout=0, grad_clip=0.0, label_smoothing=0.0, ema=None,
 ):
     """Run one training epoch. Returns (mean_loss, train_accuracy_on_used_logits).
 
     Works with SGD/AdamW (single step) and SAM (two-step). ``grad_clip`` > 0 clips
-    the update gradient; ``ema`` is updated after every optimizer step.
+    the update gradient; ``ema`` is updated after every optimizer step; ``cutout``
+    > 0 erases a random square per sample during augmentation.
     """
     model.train()
     is_sam = isinstance(optimizer, SAM)
@@ -93,7 +117,7 @@ def train_epoch(
     for x, y in loader:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         if use_aug:
-            x = augment(x)
+            x = augment(x, cutout_size=cutout)
 
         x_adv = make_adv(model, x, y, method=method, eps=eps, alpha=alpha, steps=steps)
         closure = loss_closure(model, x, y, x_adv, method=method, beta=beta, label_smoothing=label_smoothing)

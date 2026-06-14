@@ -49,12 +49,34 @@ def make_loader(ds, batch_size: int = 256, shuffle: bool = False, num_workers: i
     )
 
 
-def augment(x: torch.Tensor, pad: int = 4) -> torch.Tensor:
-    """Batched train-time augmentation: per-sample random crop + horizontal flip.
+def cutout(x: torch.Tensor, size: int) -> torch.Tensor:
+    """Zero out one random ``size``x``size`` square per sample (Cutout/random erasing).
+
+    Label-preserving regularizer. Paired with weight averaging (EMA) it improves
+    adversarial robustness (Rebuffi et al. 2021). ``size`` <= 0 is a no-op.
+    """
+    if not size or size <= 0:
+        return x
+    b, c, h, w = x.shape
+    device = x.device
+    half = size // 2
+    cy = torch.randint(0, h, (b, 1, 1), device=device)
+    cx = torch.randint(0, w, (b, 1, 1), device=device)
+    ys = torch.arange(h, device=device).view(1, h, 1)
+    xs = torch.arange(w, device=device).view(1, 1, w)
+    mask = (ys >= cy - half) & (ys < cy + half) & (xs >= cx - half) & (xs < cx + half)  # (B,H,W)
+    x = x.clone()
+    x[mask.unsqueeze(1).expand(-1, c, -1, -1)] = 0.0
+    return x
+
+
+def augment(x: torch.Tensor, pad: int = 4, cutout_size: int = 0) -> torch.Tensor:
+    """Batched train-time augmentation: per-sample random crop + flip (+ optional Cutout).
 
     Operates on a (B,3,32,32) tensor in [0,1] and returns the same shape. Crop is
     reflect-padded by ``pad`` then a random 32x32 window is taken per sample;
-    each sample is independently flipped with probability 0.5.
+    each sample is independently flipped with probability 0.5; if ``cutout_size``
+    > 0, a random square is then erased.
     """
     b, c, h, w = x.shape
     device = x.device
@@ -73,4 +95,6 @@ def augment(x: torch.Tensor, pad: int = 4) -> torch.Tensor:
     ci = torch.arange(c, device=device)[None, :, None, None]
     ri = rows[:, None, :, None]
     wi = cols[:, None, None, :]
-    return x[bi, ci, ri, wi]
+    x = x[bi, ci, ri, wi]
+
+    return cutout(x, cutout_size)

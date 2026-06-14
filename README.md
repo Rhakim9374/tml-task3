@@ -37,19 +37,26 @@ condor_submit cluster/train.sub \
 weights), evaluating clean and PGD-20 robust accuracy on a fixed 10% validation
 split every few epochs.
 
-## Regularization sweep
+## Sweep (20 parallel GPU jobs)
 
-Coordinate sweep (9 jobs) over EMA decay, weight decay, dropout, and label
-smoothing around a strong baseline, then rank by validation unified score:
+`cluster/launch_sweep.sh` submits **20 independent 1-GPU jobs** (each a separate
+`condor_submit`, so HTCondor spreads them across ~20 GPUs; wall-clock ~= one
+job). It is a coordinate search around a strong baseline plus a direct
+SGD-vs-SAM comparison, covering: optimizer (SGD/SAM), objective
+(TRADES/PGD-AT/MART), TRADES beta, EMA decay, weight decay, dropout, label
+smoothing, and Cutout.
 
 ```bash
 EPOCHS=50 bash cluster/launch_sweep.sh           # submits checkpoints/sweep_*.pt
-# wait for jobs to finish (condor_q), then:
+condor_q                                          # confirm jobs are Running, not Idle
+# after they finish, rank by validation unified score:
 ~/.tml-venv/bin/python -m scripts.collect_sweep \
     --glob "checkpoints/sweep_*.pt" --arch resnet50
 ```
 
-Take the winning config and train it longer for the final submission.
+Take the winning config and train it longer for the final submission. SAM jobs
+cost ~2x per epoch, so they finish later — `collect_sweep` just reads whatever
+checkpoints exist.
 
 ## Evaluate locally before submitting
 
