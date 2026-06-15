@@ -15,6 +15,7 @@ import os
 import torch
 from torch.utils.data import Subset
 
+from src.awp import AWP
 from src.data import get_datasets, make_loader
 from src.dualbn import convert_to_dual_bn, extract_branch_state_dict
 from src.ema import EMA
@@ -41,6 +42,8 @@ def parse_args():
                    help="peak LR; default 0.1 for sgd/sam, 1e-3 for adamw")
     p.add_argument("--warmup", type=int, default=5,
                    help="linear LR warmup epochs (resnet50 from scratch needs this to avoid NaN)")
+    p.add_argument("--lr-schedule", default="cosine", choices=["cosine", "piecewise"],
+                   help="post-warmup LR schedule; piecewise = x0.1 at 50%/75% (Rice robust-overfit recipe)")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4,
                    help="L2 weight decay (~5e-4 is near-optimal for AT; >1e-3 tends to hurt robustness)")
@@ -60,6 +63,8 @@ def parse_args():
                    help="initialize from ImageNet-pretrained weights (init only)")
     p.add_argument("--grad-clip", type=float, default=5.0,
                    help="clip global grad norm (on by default; 0 disables)")
+    p.add_argument("--awp-gamma", type=float, default=0.0,
+                   help="AWP weight-perturbation size (0 disables; try 0.005-0.01; PGD-AT/single-BN only)")
     p.add_argument("--label-smoothing", type=float, default=0.0,
                    help="label smoothing on the outer loss (0 disables; keep <=0.1)")
     p.add_argument("--ema-decay", type=float, default=0.999,
@@ -67,6 +72,8 @@ def parse_args():
 
     # Threat model (L-inf, pixel space [0,1]). 8/255 is the CIFAR standard.
     p.add_argument("--eps", type=float, default=8 / 255)
+    p.add_argument("--eps-warmup-epochs", type=int, default=0,
+                   help="linearly ramp the training attack eps 0->eps over the first N epochs (0 disables)")
     p.add_argument("--alpha", type=float, default=2 / 255, help="PGD step size")
     p.add_argument("--steps", type=int, default=10, help="inner PGD steps for training")
     p.add_argument("--eval-steps", type=int, default=20, help="PGD steps for robust eval")
@@ -144,18 +151,25 @@ def main():
         convert_to_dual_bn(model)  # adds the adv BN branch (clean branch == original)
     model = model.to(device)
     optimizer = build_optimizer(args, model.parameters())
-    # Linear warmup then cosine anneal. Warmup is essential for resnet50 from
-    # scratch: a high peak LR on epoch 1 otherwise diverges to NaN.
+    # Linear warmup then the chosen post-warmup schedule. Warmup is essential for
+    # resnet50 from scratch: a high peak LR on epoch 1 otherwise diverges to NaN.
+    # Cosine anneals smoothly to 0; piecewise holds the peak LR then drops x0.1 at
+    # 50%/75% -- the Rice et al. recipe, whose best robust checkpoint lands just
+    # after the first drop (best-by-score saving captures it as the early stop).
     warmup_epochs = min(args.warmup, max(0, args.epochs - 1))
+    post = args.epochs - warmup_epochs
+    if args.lr_schedule == "piecewise":
+        main_sched = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=[int(0.5 * post), int(0.75 * post)], gamma=0.1)
+    else:
+        main_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=post)
     if warmup_epochs > 0:
         warmup = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=0.01, total_iters=warmup_epochs)
-        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs - warmup_epochs)
         scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer, [warmup, cosine], milestones=[warmup_epochs])
+            optimizer, [warmup, main_sched], milestones=[warmup_epochs])
     else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+        scheduler = main_sched
 
     # Weight averaging. We evaluate BOTH the live and EMA models each time and keep
     # whichever scores higher. The EMA is started only AFTER warmup, snapshotted
@@ -167,6 +181,13 @@ def main():
     use_ema = bool(args.ema_decay and args.ema_decay > 0) and not args.dual_bn
     eval_model = make_model(args.arch).to(device) if (use_ema or args.dual_bn) else None
     ema = None
+
+    # Adversarial Weight Perturbation: flattens the weight-loss landscape to curb
+    # robust overfitting. Started after warmup (early weights are too unstable to
+    # ascend meaningfully); the CE ascent assumes single-BN PGD-AT.
+    if args.awp_gamma and args.awp_gamma > 0 and (args.dual_bn or args.optimizer == "sam"):
+        raise SystemExit("--awp-gamma is only wired for single-BN SGD/AdamW (not dual-bn/sam)")
+    awp = AWP(model, gamma=args.awp_gamma) if (args.awp_gamma and args.awp_gamma > 0) else None
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     best_score = -1.0
@@ -209,11 +230,19 @@ def main():
         print(line, flush=True)
 
     for epoch in range(1, args.epochs + 1):
+        # Optional eps ramp: weak attacks early stabilize training and lift the
+        # clean/robust balance; alpha scales with eps so the step ratio is fixed.
+        if args.eps_warmup_epochs and epoch <= args.eps_warmup_epochs:
+            frac = epoch / args.eps_warmup_epochs
+            eps_t, alpha_t = args.eps * frac, args.alpha * frac
+        else:
+            eps_t, alpha_t = args.eps, args.alpha
         loss, train_acc = train_epoch(
             model, train_loader, optimizer, device,
-            method=args.method, eps=args.eps, alpha=args.alpha,
+            method=args.method, eps=eps_t, alpha=alpha_t,
             steps=args.steps, beta=args.beta, cutout=args.cutout, jitter=args.color_jitter,
             grad_clip=args.grad_clip, label_smoothing=args.label_smoothing, ema=ema,
+            awp=(awp if epoch > warmup_epochs else None),
         )
         scheduler.step()
         lr = scheduler.get_last_lr()[0]
