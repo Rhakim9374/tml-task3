@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 from .attacks import pgd_linf
 from .data import augment
+from .dualbn import set_bn_mode
 from .sam import SAM, disable_running_stats, enable_running_stats
 
 
@@ -27,12 +28,16 @@ def trades_attack(model, x, eps, alpha, steps):
     """Inner TRADES maximization: perturb x to maximize KL(p(x_adv) || p(x)).
 
     KL is computed in log-space (``log_target=True``) so confident clean logits
-    don't underflow softmax to zero and produce non-finite gradients.
+    don't underflow softmax to zero and produce non-finite gradients. Under
+    dual-BN the clean target uses the clean branch and the attack the adv branch
+    (set_bn_mode is a no-op on stock models).
     """
     was_training = model.training
     model.eval()  # keep BN stats fixed during the attack
+    set_bn_mode(model, "clean")
     log_p_clean = F.log_softmax(model(x).detach(), dim=1)
 
+    set_bn_mode(model, "adv")
     x_adv = x.clone().detach() + 0.001 * torch.randn_like(x)
     x_adv = x_adv.clamp(0.0, 1.0)
     for _ in range(steps):
@@ -45,6 +50,7 @@ def trades_attack(model, x, eps, alpha, steps):
 
     if was_training:
         model.train()
+    set_bn_mode(model, "clean")
     return x_adv.detach()
 
 
@@ -52,9 +58,13 @@ def make_adv(model, x, y, *, method, eps, alpha, steps):
     """Generate the adversarial batch for one step at the current weights.
 
     PGD-AT and MART use a CE-based PGD attack; TRADES uses its KL-based attack.
+    Under dual-BN the attack runs through the adv branch.
     """
     if method in ("pgd", "mart"):
-        return pgd_linf(model, x, y, eps=eps, alpha=alpha, steps=steps, random_start=True)
+        set_bn_mode(model, "adv")
+        x_adv = pgd_linf(model, x, y, eps=eps, alpha=alpha, steps=steps, random_start=True)
+        set_bn_mode(model, "clean")
+        return x_adv
     if method == "trades":
         return trades_attack(model, x, eps, alpha, steps)
     raise ValueError(f"unknown method {method!r} (expected 'pgd', 'trades', or 'mart')")
@@ -78,8 +88,11 @@ def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
         # is boosted by the margin to the most-confident wrong class, and the KL
         # regularizer is up-weighted on examples the clean model is unsure about.
         def closure():
+            set_bn_mode(model, "clean")
             logits_clean = model(x)
+            set_bn_mode(model, "adv")
             logits_adv = model(x_adv)
+            set_bn_mode(model, "clean")
             log_adv = F.log_softmax(logits_adv, dim=1)
             log_nat = F.log_softmax(logits_clean, dim=1)
             adv_probs = log_adv.exp()
@@ -97,10 +110,13 @@ def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
     # TRADES: CE(clean) + beta * KL(p(x_adv) || p(x)). The KL is done in log-space
     # (log_target=True) so a confident clean softmax can't underflow to zero and
     # send the backward to NaN -- the failure mode of the raw-softmax target on
-    # our un-normalized [0,1] inputs.
+    # our un-normalized [0,1] inputs. Clean forward -> clean BN, adv -> adv BN.
     def closure():
+        set_bn_mode(model, "clean")
         logits_clean = model(x)
+        set_bn_mode(model, "adv")
         log_p_adv = F.log_softmax(model(x_adv), dim=1)
+        set_bn_mode(model, "clean")
         log_p_clean = F.log_softmax(logits_clean, dim=1)
         loss = F.cross_entropy(logits_clean, y, label_smoothing=label_smoothing) \
             + beta * F.kl_div(log_p_adv, log_p_clean, reduction="batchmean", log_target=True)
@@ -110,7 +126,7 @@ def loss_closure(model, x, y, x_adv, *, method, beta, label_smoothing):
 
 def train_epoch(
     model, loader, optimizer, device, *, method, eps, alpha, steps, beta,
-    use_aug=True, cutout=0, grad_clip=0.0, label_smoothing=0.0, ema=None,
+    use_aug=True, cutout=0, jitter=0.0, grad_clip=0.0, label_smoothing=0.0, ema=None,
 ):
     """Run one training epoch. Returns (mean_loss, train_accuracy_on_used_logits).
 
@@ -125,7 +141,7 @@ def train_epoch(
     for x, y in loader:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         if use_aug:
-            x = augment(x, cutout_size=cutout)
+            x = augment(x, cutout_size=cutout, jitter=jitter)
 
         x_adv = make_adv(model, x, y, method=method, eps=eps, alpha=alpha, steps=steps)
         closure = loss_closure(model, x, y, x_adv, method=method, beta=beta, label_smoothing=label_smoothing)

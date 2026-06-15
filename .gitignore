@@ -8,6 +8,9 @@ ProjectDescriptions/
 # Reference copies pulled from HuggingFace (kept locally for convenience)
 reference/
 
+# Internal contingency plans — not part of the deliverable
+plans/
+
 # Dataset (127 MB) — fetched from HuggingFace, never committed
 data/
 *.npz

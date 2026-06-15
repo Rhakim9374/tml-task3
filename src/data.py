@@ -49,6 +49,40 @@ def make_loader(ds, batch_size: int = 256, shuffle: bool = False, num_workers: i
     )
 
 
+def random_d4_rotate(x: torch.Tensor) -> torch.Tensor:
+    """Per-sample random 90-degree rotation. Combined with the horizontal flip in
+    ``augment`` this realizes the full D4 dihedral symmetry -- appropriate for
+    histopathology, which has no canonical orientation. Lossless (no interpolation)."""
+    b = x.size(0)
+    k = torch.randint(0, 4, (b,), device=x.device)
+    out = x.clone()
+    for kk in (1, 2, 3):
+        m = k == kk
+        if m.any():
+            out[m] = torch.rot90(x[m], kk, dims=(-2, -1))
+    return out
+
+
+def color_jitter(x: torch.Tensor, strength: float) -> torch.Tensor:
+    """Per-sample brightness / contrast / per-channel gain jitter (in [0,1]).
+
+    A cheap stain-variation proxy for H&E images: the per-channel gain mimics
+    staining-intensity differences across slides. ``strength`` <= 0 is a no-op.
+    """
+    if not strength or strength <= 0:
+        return x
+    b, dev, s = x.size(0), x.device, strength
+
+    def factor(lo, hi):
+        return torch.rand(b, 1, 1, 1, device=dev) * (hi - lo) + lo
+
+    x = x * factor(1 - s, 1 + s)                                   # brightness
+    x = x * ((torch.rand(b, 3, 1, 1, device=dev) * 2 - 1) * s + 1)  # per-channel (stain) gain
+    mean = x.mean(dim=(1, 2, 3), keepdim=True)
+    x = (x - mean) * factor(1 - s, 1 + s) + mean                  # contrast
+    return x.clamp(0.0, 1.0)
+
+
 def cutout(x: torch.Tensor, size: int) -> torch.Tensor:
     """Zero out one random ``size``x``size`` square per sample (Cutout/random erasing).
 
@@ -70,20 +104,22 @@ def cutout(x: torch.Tensor, size: int) -> torch.Tensor:
     return x
 
 
-def augment(x: torch.Tensor, pad: int = 4, cutout_size: int = 0) -> torch.Tensor:
-    """Batched train-time augmentation: per-sample random crop + flip (+ optional Cutout).
+def augment(x: torch.Tensor, pad: int = 4, cutout_size: int = 0, jitter: float = 0.0) -> torch.Tensor:
+    """Batched train-time augmentation for histopathology, on (B,3,32,32) in [0,1].
 
-    Operates on a (B,3,32,32) tensor in [0,1] and returns the same shape. Crop is
-    reflect-padded by ``pad`` then a random 32x32 window is taken per sample;
-    each sample is independently flipped with probability 0.5; if ``cutout_size``
-    > 0, a random square is then erased.
+    Always applies the D4 symmetry (random h-flip + random 90-degree rotation,
+    valid because tissue patches have no canonical orientation) and a reflect-pad
+    random crop. ``jitter`` > 0 adds stain/color jitter; ``cutout_size`` > 0 erases
+    a random square. Returns the same shape.
     """
     b, c, h, w = x.shape
     device = x.device
 
-    # Random horizontal flip (per sample).
+    # D4 symmetry: random horizontal flip + random 90-degree rotation (per sample).
     flip = torch.rand(b, device=device) < 0.5
     x = torch.where(flip[:, None, None, None], x.flip(-1), x)
+    x = random_d4_rotate(x)
+    x = color_jitter(x, jitter)
 
     # Reflect-pad then per-sample random crop via gather indexing.
     x = F.pad(x, (pad, pad, pad, pad), mode="reflect")

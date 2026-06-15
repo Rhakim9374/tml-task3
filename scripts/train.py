@@ -13,11 +13,14 @@ import argparse
 import os
 
 import torch
+from torch.utils.data import Subset
 
 from src.data import get_datasets, make_loader
+from src.dualbn import convert_to_dual_bn, extract_branch_state_dict
 from src.ema import EMA
 from src.eval import evaluate_clean, evaluate_robust, unified_score
 from src.model import make_model
+from src.robust_eval import strong_robust_accuracy
 from src.sam import SAM
 from src.train import train_epoch
 
@@ -48,6 +51,13 @@ def parse_args():
                    help="dropout prob before fc (0 disables; try 0.1-0.2)")
     p.add_argument("--cutout", type=int, default=0,
                    help="Cutout square size in px (0 disables; try 8-16; pairs with EMA)")
+    p.add_argument("--color-jitter", type=float, default=0.0,
+                   help="stain/color jitter strength (0 disables; try 0.1-0.2)")
+    p.add_argument("--dual-bn", action="store_true",
+                   help="AdvProp dual BatchNorm (clean/adv branches, shared weights); "
+                        "use with trades/mart; disables EMA")
+    p.add_argument("--pretrained", action="store_true",
+                   help="initialize from ImageNet-pretrained weights (init only)")
     p.add_argument("--grad-clip", type=float, default=5.0,
                    help="clip global grad norm (on by default; 0 disables)")
     p.add_argument("--label-smoothing", type=float, default=0.0,
@@ -60,6 +70,13 @@ def parse_args():
     p.add_argument("--alpha", type=float, default=2 / 255, help="PGD step size")
     p.add_argument("--steps", type=int, default=10, help="inner PGD steps for training")
     p.add_argument("--eval-steps", type=int, default=20, help="PGD steps for robust eval")
+
+    # Strong (AutoAttack-style CE+DLR) eval -- also save best-by-TRUE-robustness.
+    p.add_argument("--strong-eval-every", type=int, default=0,
+                   help="run strong CE+DLR eval every N epochs (0 disables); also writes <out>.strong.pt")
+    p.add_argument("--strong-eval-n", type=int, default=1000, help="val subset size for strong eval")
+    p.add_argument("--strong-steps", type=int, default=50)
+    p.add_argument("--strong-restarts", type=int, default=1)
 
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
@@ -122,7 +139,10 @@ def main():
     val_loader = make_loader(val_ds, args.batch_size, shuffle=False, num_workers=args.workers)
     print(f"train={len(train_ds)}  val={len(val_ds)}", flush=True)
 
-    model = make_model(args.arch, dropout=args.dropout).to(device)
+    model = make_model(args.arch, dropout=args.dropout, pretrained=args.pretrained)
+    if args.dual_bn:
+        convert_to_dual_bn(model)  # adds the adv BN branch (clean branch == original)
+    model = model.to(device)
     optimizer = build_optimizer(args, model.parameters())
     # Linear warmup then cosine anneal. Warmup is essential for resnet50 from
     # scratch: a high peak LR on epoch 1 otherwise diverges to NaN.
@@ -142,18 +162,57 @@ def main():
     # from the post-warmup weights: averaging in the chaotic random-init/warmup
     # weights lands in a dead region of weight space (degenerate, constant-output
     # model), so we anchor the average to already-sensible weights.
-    use_ema = bool(args.ema_decay and args.ema_decay > 0)
-    eval_model = make_model(args.arch).to(device) if use_ema else None
+    # Dual-BN evaluates its extracted clean/adv branches instead of live/EMA, so
+    # EMA is disabled there (one BN-averaging mechanism at a time).
+    use_ema = bool(args.ema_decay and args.ema_decay > 0) and not args.dual_bn
+    eval_model = make_model(args.arch).to(device) if (use_ema or args.dual_bn) else None
     ema = None
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     best_score = -1.0
 
+    # Strong (CE+DLR, AutoAttack-style) eval: keep a SEPARATE best-by-true-
+    # robustness checkpoint so we never select a gradient-masked model.
+    root, ext = os.path.splitext(args.out)
+    strong_out = root + ".strong" + ext
+    best_strong = -1.0
+    strong_loader = None
+    if args.strong_eval_every > 0:
+        n = min(args.strong_eval_n, len(val_ds))
+        strong_loader = make_loader(Subset(val_ds, list(range(n))), args.batch_size, num_workers=args.workers)
+
+    def eval_and_maybe_save(name, m, do_strong=False):
+        nonlocal best_score, best_strong
+        clean = evaluate_clean(m, val_loader, device)
+        robust = evaluate_robust(
+            m, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.eval_steps
+        )
+        score = unified_score(clean, robust)
+        marker = ""
+        if clean > 0.50 and score > best_score:  # respect the >50% clean gate
+            best_score = score
+            torch.save(m.state_dict(), args.out)
+            marker = "  *saved*"
+        line = f"    val[{name}]: clean={clean:.4f} robust={robust:.4f} score={score:.4f}{marker}"
+        if do_strong:
+            s_rob = strong_robust_accuracy(
+                m, strong_loader, device, eps=args.eps,
+                steps=args.strong_steps, restarts=args.strong_restarts,
+            )
+            s_score = unified_score(clean, s_rob)
+            smark = ""
+            if clean > 0.50 and s_score > best_strong:
+                best_strong = s_score
+                torch.save(m.state_dict(), strong_out)
+                smark = "  *saved-strong*"
+            line += f"  strong_robust={s_rob:.4f} strong_score={s_score:.4f}{smark}"
+        print(line, flush=True)
+
     for epoch in range(1, args.epochs + 1):
         loss, train_acc = train_epoch(
             model, train_loader, optimizer, device,
             method=args.method, eps=args.eps, alpha=args.alpha,
-            steps=args.steps, beta=args.beta, cutout=args.cutout,
+            steps=args.steps, beta=args.beta, cutout=args.cutout, jitter=args.color_jitter,
             grad_clip=args.grad_clip, label_smoothing=args.label_smoothing, ema=ema,
         )
         scheduler.step()
@@ -166,29 +225,27 @@ def main():
 
         is_last = epoch == args.epochs
         if epoch % args.eval_every == 0 or is_last:
-            variants = {"live": model}
-            if ema is not None:
-                ema.copy_to(eval_model)
-                recompute_bn(eval_model, train_loader, device)  # fix BN stats for averaged weights
-                variants["ema"] = eval_model
-            for name, m in variants.items():
-                clean = evaluate_clean(m, val_loader, device)
-                robust = evaluate_robust(
-                    m, val_loader, device, eps=args.eps, alpha=args.alpha, steps=args.eval_steps
-                )
-                score = unified_score(clean, robust)
-                marker = ""
-                if clean > 0.50 and score > best_score:  # respect the >50% clean gate
-                    best_score = score
-                    torch.save(m.state_dict(), args.out)
-                    marker = "  *saved*"
-                print(
-                    f"    val[{name}]: clean={clean:.4f} robust={robust:.4f} score={score:.4f}{marker}",
-                    flush=True,
-                )
+            do_strong = args.strong_eval_every > 0 and (epoch % args.strong_eval_every == 0 or is_last)
+            if args.dual_bn:
+                # Extract each BN branch into a stock model and keep the better.
+                # Clean branch: re-estimate BN on clean data (matches clean test).
+                # Adv branch: keep its adversarial stats (consistent with its affine).
+                for branch in ("clean", "adv"):
+                    eval_model.load_state_dict(extract_branch_state_dict(model.state_dict(), branch))
+                    if branch == "clean":
+                        recompute_bn(eval_model, train_loader, device)
+                    eval_and_maybe_save(f"dbn-{branch}", eval_model, do_strong=do_strong)
+            else:
+                eval_and_maybe_save("live", model, do_strong=do_strong)
+                if ema is not None:
+                    ema.copy_to(eval_model)
+                    recompute_bn(eval_model, train_loader, device)  # fix BN stats for averaged weights
+                    eval_and_maybe_save("ema", eval_model, do_strong=do_strong)
             model.train()  # evaluate_* left the model in eval mode
 
-    print(f"done. best unified score={best_score:.4f}  saved at {args.out}", flush=True)
+    print(f"done. best score={best_score:.4f} ({args.out})", flush=True)
+    if args.strong_eval_every > 0:
+        print(f"      best strong score={best_strong:.4f} ({strong_out})", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,58 +1,50 @@
 #!/usr/bin/env bash
-# Parallel sweep for the robustness task -- 20 independent 1-GPU jobs, designed
-# to saturate ~20 cluster GPUs at once (each is a separate condor_submit, so the
-# scheduler spreads them across machines/GPUs; wall-clock ~= one job).
+# Focused 100-epoch batch (batch 2), pruned from the 50-epoch sweep results.
 #
-# Coordinate search around a strong baseline plus a direct SGD-vs-SAM showdown.
-# Baseline: resnet50, TRADES, SGD, beta=6, ema=0.999, wd=5e-4, dropout=0.1,
-#           label-smoothing=0.1, cutout=0, grad-clip=5.
+# Findings carried in: everything was undertrained at 50 epochs (-> 100 here);
+# dropout HURTS (-> 0); SAM gave no benefit at 2x cost (-> dropped); cutout lowered
+# the score (-> dropped, D4 rotation is always-on instead); label smoothing was
+# masking-suspect (-> 0); higher weight decay (1e-3) beat 5e-4 on robustness (a
+# stronger lever than beta). This batch combines the winning knobs and adds the
+# untested high-upside levers: AdvProp dual-BN and H&E stain jitter.
 #
-# After all jobs finish, rank with:
-#   ~/.tml-venv/bin/python -m scripts.collect_sweep --glob "checkpoints/sweep_*.pt" --arch resnet50
+# Common base: resnet50, SGD, dropout 0, label-smoothing 0, D4 rotation (default),
+# grad-clip 5, EMA 0.999 (off under dual-bn). Each run ALSO does a strong CE+DLR
+# (AutoAttack-style) eval every 10 epochs and writes a best-by-true-robustness
+# checkpoint <out>.strong.pt -- so finished runs already carry honest robustness.
 #
-# Override epochs for a faster pass: EPOCHS=40 bash cluster/launch_sweep.sh
-# (SAM jobs cost ~2x per epoch, so they finish later -- that's fine, they run in
-# parallel and collect_sweep just reads whatever checkpoints exist.)
+# Rank after:  python -m scripts.analyze_trends --glob "runlogs/sweep_*.out"
+#              python -m scripts.collect_sweep   --glob "checkpoints/*.pt" --arch resnet50
+#              python -m scripts.autoattack_eval --glob "checkpoints/*.strong.pt" --arch resnet50
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CODE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 cd "$CODE_DIR"
 
-EPOCHS="${EPOCHS:-50}"
-BASE="--arch resnet50 --epochs ${EPOCHS} --grad-clip 5.0"
+EPOCHS="${EPOCHS:-100}"
+BASE="--arch resnet50 --epochs ${EPOCHS} --optimizer sgd --dropout 0 --label-smoothing 0 --grad-clip 5.0 --warmup 5 --strong-eval-every 10"
 
-# name | full knob args (each config sets every knob explicitly for clarity)
+# name | knob args (method / beta / weight-decay / dual-bn / jitter / ema)
 CONFIGS=(
-  # --- baseline + direct SGD vs SAM ---
-  "baseline|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "sam|--method trades --optimizer sam  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  # --- objective: pgd-at and mart (vs trades baseline) ---
-  "pgd|--method pgd    --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "mart|--method mart   --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  # --- TRADES beta (clean/robust dial) ---
-  "beta3|--method trades --optimizer sgd  --beta 3.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "beta9|--method trades --optimizer sgd  --beta 9.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  # --- EMA decay ---
-  "ema9995|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.9995 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "ema998|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.998 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  # --- weight decay ---
-  "wd1e3|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 1e-3 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "wd2e4|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 2e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  # --- dropout ---
-  "drop0|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.0 --label-smoothing 0.1 --cutout 0"
-  "drop2|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.2 --label-smoothing 0.1 --cutout 0"
-  # --- label smoothing ---
-  "ls0|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.0 --cutout 0"
-  "ls2|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.2 --cutout 0"
-  # --- Cutout augmentation (pairs with EMA) ---
-  "cutout8|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 8"
-  "cutout16|--method trades --optimizer sgd  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 16"
-  # --- SAM combined with the most promising add-ons ---
-  "sam_cutout8|--method trades --optimizer sam  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 8"
-  "sam_beta9|--method trades --optimizer sam  --beta 9.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "sam_mart|--method mart   --optimizer sam  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
-  "sam_pgd|--method pgd    --optimizer sam  --beta 6.0 --ema-decay 0.999 --weight-decay 5e-4 --dropout 0.1 --label-smoothing 0.1 --cutout 0"
+  # --- frontier: method x beta, winning knobs (wd 1e-3, EMA on) ---
+  "pgd|--method pgd    --weight-decay 1e-3 --ema-decay 0.999"
+  "trades_b6|--method trades --beta 6.0  --weight-decay 1e-3 --ema-decay 0.999"
+  "trades_b9|--method trades --beta 9.0  --weight-decay 1e-3 --ema-decay 0.999"
+  "trades_b12|--method trades --beta 12.0 --weight-decay 1e-3 --ema-decay 0.999"
+  "mart|--method mart   --weight-decay 1e-3 --ema-decay 0.999"
+  # --- weight-decay lever (it beat beta for robustness) ---
+  "trades_b6_wd2e3|--method trades --beta 6.0 --weight-decay 2e-3 --ema-decay 0.999"
+  "trades_b6_wd5e4|--method trades --beta 6.0 --weight-decay 5e-4 --ema-decay 0.999"
+  "pgd_wd5e4|--method pgd    --weight-decay 5e-4 --ema-decay 0.999"
+  "mart_wd2e3|--method mart   --weight-decay 2e-3 --ema-decay 0.999"
+  # --- AdvProp dual-BN (highest-upside untested lever; EMA off) ---
+  "dbn_trades_b6|--method trades --beta 6.0 --weight-decay 1e-3 --dual-bn --ema-decay 0"
+  "dbn_trades_b9|--method trades --beta 9.0 --weight-decay 1e-3 --dual-bn --ema-decay 0"
+  "dbn_mart|--method mart   --weight-decay 1e-3 --dual-bn --ema-decay 0"
+  # --- H&E stain jitter ---
+  "cj_trades_b6|--method trades --beta 6.0 --weight-decay 1e-3 --color-jitter 0.1 --ema-decay 0.999"
+  "dbn_cj_b6|--method trades --beta 6.0 --weight-decay 1e-3 --color-jitter 0.1 --dual-bn --ema-decay 0"
 )
 
 mkdir -p checkpoints runlogs
