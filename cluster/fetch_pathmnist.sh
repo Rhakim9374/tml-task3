@@ -31,12 +31,21 @@ else
   /tmp/mvenv/bin/python -c "from medmnist import PathMNIST; PathMNIST(split='train', download=True, root='data')"
 fi
 
-# Sanity-check shapes, splits, and label range (numpy is already available).
+# Sanity-check the archive. Prefer numpy (full shapes + label range); fall back to
+# stdlib zipfile so this still works on the login node, whose python3 has no numpy.
 python3 - <<'PY'
-import numpy as np
-d = np.load("data/pathmnist.npz")
-print("keys:", sorted(d.keys()))
-print("train:", d["train_images"].shape, " val:", d["val_images"].shape, " test:", d["test_images"].shape)
-print("labels:", int(d["train_labels"].min()), "-", int(d["train_labels"].max()), "(expected 0-8)")
+try:
+    import numpy as np
+    d = np.load("data/pathmnist.npz")
+    print("keys:", sorted(d.keys()))
+    print("train:", d["train_images"].shape, " val:", d["val_images"].shape, " test:", d["test_images"].shape)
+    print("labels:", int(d["train_labels"].min()), "-", int(d["train_labels"].max()), "(expected 0-8)")
+except ImportError:
+    import zipfile
+    names = set(zipfile.ZipFile("data/pathmnist.npz").namelist())
+    print("members:", sorted(names))
+    expected = {f"{s}_{k}.npy" for s in ("train", "val", "test") for k in ("images", "labels")}
+    missing = expected - names
+    print("all splits present" if not missing else f"MISSING: {sorted(missing)}")
 PY
 echo "OK -> data/pathmnist.npz"
