@@ -23,7 +23,7 @@ import os
 
 import torch
 
-from src.data import get_datasets, make_loader
+from src.data import get_datasets, load_pathmnist, make_loader
 from src.eval import evaluate_clean, evaluate_robust, unified_score
 from src.model import make_model
 from src.robust_eval import strong_robust_accuracy
@@ -34,6 +34,10 @@ def parse_args():
     p.add_argument("--glob", default="checkpoints/sweep_*.pt", help="checkpoint glob")
     p.add_argument("--arch", default="resnet50", choices=["resnet18", "resnet34", "resnet50"])
     p.add_argument("--data", default="data/train.npz")
+    p.add_argument("--extra-data", default=None,
+                   help="evaluate on the PathMNIST val split from this npz -- the leakage-free common set for "
+                        "comparing external-trained (90k) and internal models (REQUIRED for the external sweep, "
+                        "whose models trained on a superset of the default 50k val slice)")
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--batch-size", type=int, default=256)
@@ -57,7 +61,11 @@ def main():
     if not paths:
         raise SystemExit(f"no checkpoints match {args.glob!r}")
 
-    _, val_ds = get_datasets(args.data, val_frac=args.val_frac, seed=args.seed)
+    if args.extra_data:
+        vx, vy = load_pathmnist(args.extra_data, "val")
+        val_ds = torch.utils.data.TensorDataset(vx, vy)
+    else:
+        _, val_ds = get_datasets(args.data, val_frac=args.val_frac, seed=args.seed)
     if args.n_samples and args.n_samples < len(val_ds):
         val_ds = torch.utils.data.Subset(val_ds, list(range(args.n_samples)))
     val_loader = make_loader(val_ds, args.batch_size, shuffle=False)

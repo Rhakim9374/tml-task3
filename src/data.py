@@ -38,6 +38,50 @@ def get_datasets(path: str, val_frac: float = 0.1, seed: int = 0):
     return train_ds, val_ds
 
 
+def _resize_to_32(x: torch.Tensor) -> torch.Tensor:
+    """Bilinear-resize (N,3,H,W) in [0,1] to 32x32, chunked to bound peak memory."""
+    if x.shape[-1] == 32 and x.shape[-2] == 32:
+        return x
+    out = [F.interpolate(x[i:i + 8192], size=32, mode="bilinear", align_corners=False)
+           for i in range(0, x.size(0), 8192)]
+    return torch.cat(out)
+
+
+def load_pathmnist(path: str, split: str) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Load a PathMNIST split from the MedMNIST npz as [0,1] (N,3,32,32) images.
+
+    PathMNIST stores (N,28,28,3) uint8 per split; we channel-first it, scale to
+    [0,1], and bilinear-resize 28->32 to match the provided data's preprocessing
+    (the given 50k is PathMNIST resized to 32). Labels are (N,1) -> (N,), already
+    in the same 0-8 encoding as the task.
+    """
+    data = np.load(path)
+    imgs = torch.from_numpy(data[f"{split}_images"]).permute(0, 3, 1, 2).float() / 255.0
+    labels = torch.from_numpy(data[f"{split}_labels"].reshape(-1)).long()
+    return _resize_to_32(imgs), labels
+
+
+def get_datasets_pathmnist(extra_path, provided_path="data/train.npz", use_extra_train=False, seed=0):
+    """Datasets for the external-data experiments -- leakage-free and comparable.
+
+    Validation = the PathMNIST VAL split: disjoint from both the provided 50k and
+    the 90k train superset (and from the hidden PathMNIST TEST), so it is a clean
+    selection set usable for internal AND external runs alike. Training = the
+    PathMNIST TRAIN split (89,996; supersedes our 50k) when ``use_extra_train``,
+    else the full provided 50k. ``seed`` is unused (the splits are the official
+    MedMNIST ones) but kept for call-site symmetry.
+
+    Only ever touches train/val, never the test split -- see the leakage policy in
+    plans/IF_external_data_allowed.txt. Requires external data to be rules-permitted.
+    """
+    val_x, val_y = load_pathmnist(extra_path, "val")
+    if use_extra_train:
+        tr_x, tr_y = load_pathmnist(extra_path, "train")
+    else:
+        tr_x, tr_y = load_npz(provided_path)
+    return TensorDataset(tr_x, tr_y), TensorDataset(val_x, val_y)
+
+
 def make_loader(ds, batch_size: int = 256, shuffle: bool = False, num_workers: int = 4) -> DataLoader:
     return DataLoader(
         ds,

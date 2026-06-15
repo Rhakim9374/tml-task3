@@ -16,7 +16,7 @@ import torch
 from torch.utils.data import Subset
 
 from src.awp import AWP
-from src.data import get_datasets, make_loader
+from src.data import get_datasets, get_datasets_pathmnist, make_loader
 from src.dualbn import convert_to_dual_bn, extract_branch_state_dict
 from src.ema import EMA
 from src.eval import evaluate_clean, evaluate_robust, unified_score
@@ -44,6 +44,8 @@ def parse_args():
                    help="linear LR warmup epochs (resnet50 from scratch needs this to avoid NaN)")
     p.add_argument("--lr-schedule", default="cosine", choices=["cosine", "piecewise"],
                    help="post-warmup LR schedule; piecewise = x0.1 at 50%/75% (Rice robust-overfit recipe)")
+    p.add_argument("--min-lr", type=float, default=0.0,
+                   help="cosine LR floor (eta_min); >0 keeps late-training LR alive so plateau vs still-climbing is visible")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4,
                    help="L2 weight decay (~5e-4 is near-optimal for AT; >1e-3 tends to hurt robustness)")
@@ -85,6 +87,12 @@ def parse_args():
     p.add_argument("--strong-steps", type=int, default=50)
     p.add_argument("--strong-restarts", type=int, default=1)
 
+    p.add_argument("--extra-data", default=None,
+                   help="path to PathMNIST npz; validation switches to its leakage-free val split (clean selection "
+                        "for internal AND external runs, since it is disjoint from the 50k and the 90k superset)")
+    p.add_argument("--extra-train", action="store_true",
+                   help="train on the PathMNIST TRAIN superset (90k) instead of the provided 50k; requires "
+                        "--extra-data and that external data is permitted by the task rules")
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--eval-every", type=int, default=5)
@@ -141,7 +149,15 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}  args={vars(args)}", flush=True)
 
-    train_ds, val_ds = get_datasets(args.data, val_frac=args.val_frac, seed=args.seed)
+    if args.extra_data:
+        train_ds, val_ds = get_datasets_pathmnist(
+            args.extra_data, provided_path=args.data, use_extra_train=args.extra_train, seed=args.seed)
+        src = "pathmnist-train(90k)" if args.extra_train else "provided-50k"
+        print(f"data: train={src}  val=pathmnist-val (leakage-free)", flush=True)
+    elif args.extra_train:
+        raise SystemExit("--extra-train requires --extra-data")
+    else:
+        train_ds, val_ds = get_datasets(args.data, val_frac=args.val_frac, seed=args.seed)
     train_loader = make_loader(train_ds, args.batch_size, shuffle=True, num_workers=args.workers)
     val_loader = make_loader(val_ds, args.batch_size, shuffle=False, num_workers=args.workers)
     print(f"train={len(train_ds)}  val={len(val_ds)}", flush=True)
@@ -162,7 +178,7 @@ def main():
         main_sched = torch.optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=[int(0.5 * post), int(0.75 * post)], gamma=0.1)
     else:
-        main_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=post)
+        main_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=post, eta_min=args.min_lr)
     if warmup_epochs > 0:
         warmup = torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=0.01, total_iters=warmup_epochs)
