@@ -1,6 +1,6 @@
 """Per-run eval *trajectories* from the training logs -- BOTH robust scores.
 
-collect_sweep/rank_robust score saved checkpoints; this shows the trend over
+rank_robust scores saved checkpoints; this shows the trend over
 epochs, parsed from the val lines in runlogs/*.out. Each run logs a PGD-20 score
 every eval and a strong CE+DLR score every --strong-eval-every epochs, so per
 config we surface BOTH: the PGD-score peak/final (the leaderboard-proxy attack)

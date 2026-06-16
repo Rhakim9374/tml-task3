@@ -1,9 +1,9 @@
 """Rank checkpoints under BOTH attacks at once, to avoid overfitting to one.
 
 The leaderboard appears to grade with a PGD-class attack, so ranking only by
-PGD-20 (`collect_sweep`) would reward gradient-masked models that look robust to
-PGD but collapse under a stronger attack -- a brittle pick if the final/hidden
-grading is tougher. This evaluates every checkpoint under the PGD-20 attack AND
+PGD-20 would reward gradient-masked models that look robust to PGD but collapse
+under a stronger attack -- a brittle pick if the final/hidden grading is tougher.
+This evaluates every checkpoint under the PGD-20 attack AND
 our dependency-free strong CE+DLR multi-restart attack (an AutoAttack proxy that
 needs no extra package), then ranks by the WORST-CASE score across the two, so
 the winner is whatever holds up best regardless of which attack is used.

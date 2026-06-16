@@ -4,11 +4,8 @@ Vanilla PGD-CE overestimates robustness under gradient masking (common with
 TRADES + label smoothing). This runs multi-restart PGD with both cross-entropy
 and the scale-invariant DLR loss -- the white-box core of AutoAttack's APGD --
 and counts an example robust only if it survives every attack. The CE-vs-DLR and
-multi-restart structure exposes most masking that plain PGD misses.
-
-``strong_robust_accuracy`` is dependency-free. For the full benchmark (adding
-FAB + the black-box Square attack), pass an installed official AutoAttack model
-to ``autoattack_accuracy`` (``pip install git+https://github.com/fra31/auto-attack``).
+multi-restart structure exposes most masking that plain PGD misses, so it serves
+as our dependency-free AutoAttack proxy for honest model selection.
 """
 
 import torch
@@ -63,13 +60,3 @@ def strong_robust_accuracy(model, loader, device, *, eps=8 / 255, steps=50, rest
         robust += surv.sum().item()
         total += y.size(0)
     return robust / total
-
-
-def autoattack_accuracy(model, x_test, y_test, *, eps=8 / 255, bs=256, version="standard"):
-    """Official AutoAttack robust accuracy (requires the autoattack package)."""
-    from autoattack import AutoAttack
-
-    adversary = AutoAttack(model, norm="Linf", eps=eps, version=version)
-    x_adv = adversary.run_standard_evaluation(x_test, y_test, bs=bs)
-    with torch.no_grad():
-        return (model(x_adv).argmax(1) == y_test).float().mean().item()

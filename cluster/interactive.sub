@@ -6,7 +6,7 @@
 # Then, inside the container (cd into wherever you cloned the repo):
 #   cd ~/tml-task3
 #   pip install -r requirements.txt
-#   python -m scripts.collect_sweep --glob "checkpoints/*.pt" --arch resnet50
+#   python -m scripts.rank_robust --glob "checkpoints/*.pt" --arch resnet50
 
 universe      = docker
 docker_image  = pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
