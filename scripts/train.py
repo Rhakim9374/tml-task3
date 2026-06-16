@@ -63,6 +63,9 @@ def parse_args():
                         "use with trades/mart; disables EMA")
     p.add_argument("--pretrained", action="store_true",
                    help="initialize from ImageNet-pretrained weights (init only)")
+    p.add_argument("--init-from", default=None,
+                   help="warm-start: load this state dict as the model init (weights only; optimizer/EMA/"
+                        "schedule start fresh -- a warm restart, not a true resume)")
     p.add_argument("--grad-clip", type=float, default=5.0,
                    help="clip global grad norm (on by default; 0 disables)")
     p.add_argument("--awp-gamma", type=float, default=0.0,
@@ -163,6 +166,9 @@ def main():
     print(f"train={len(train_ds)}  val={len(val_ds)}", flush=True)
 
     model = make_model(args.arch, dropout=args.dropout, pretrained=args.pretrained)
+    if args.init_from:
+        model.load_state_dict(torch.load(args.init_from, map_location="cpu"), strict=True)
+        print(f"warm-start: loaded weights from {args.init_from}", flush=True)
     if args.dual_bn:
         convert_to_dual_bn(model)  # adds the adv BN branch (clean branch == original)
     model = model.to(device)
