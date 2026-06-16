@@ -1,52 +1,48 @@
 #!/usr/bin/env bash
-# Batch 4: long-LR-floor trend + PGD-step balance + external data (6 jobs, <10 GPUs).
+# Batch 5 (FINAL): seeds + a small-dropout variant of the winning recipe, longer
+# and with a gentler LR schedule.
 #
-# Settled so far: plain PGD-AT (resnet50, wd 1e-3, EMA 0.999) is the recipe; every
-# robust-overfit lever (AWP/piecewise/high-WD/dropout) was neutral-to-negative
-# because the runs PLATEAU, not overfit. Best to date: pgd_s1 -> leaderboard 0.6092.
-# Data-limited ceiling looks ~0.61-0.62; the only lever big enough for the 0.05 gap
-# to the top is more in-distribution data.
+# Settled: plain PGD-AT (resnet50, wd 1e-3, EMA 0.999) is the recipe; steps 7 was
+# the best clean/robust balance in batch 4; external PathMNIST data gave NO gain
+# (capacity-bound, not data-bound) -> internal 50k only. Best to date: pgd200_s7.
 #
-# So this batch is a clean 2x3 grid -- data {provided-50k, PathMNIST-90k} x PGD
-# training steps {7, 10, 15} -- all sharing ONE schedule change:
-#   - 200 epochs with a cosine FLOOR of min-lr 0.005: the LR never anneals to 0, so
-#     we can read whether robust acc is truly plateaued or still climbing.
-#   - steps 7 vs 10 vs 15: the only untested clean/robust *balance* knob (fewer
-#     steps -> higher clean, our binding side; more -> more robust, lower clean).
-#   - half the grid trains on the PathMNIST TRAIN superset (90k, supersedes our 50k).
+# This batch keeps that recipe and changes only the schedule + explores the seed
+# lottery (the one remaining lever) plus a gentle dropout:
+#   - 300 epochs (a bit longer)
+#   - peak LR 0.05 (lower than the previous 0.1) and NO min-lr floor (cosine -> 0):
+#     a gentler, fully-annealed schedule for a more converged final model.
+#   - 3 seeds (variance on the winner) + 1 small-dropout (0.05) variant at seed 1.
 #
-# LEAKAGE-SAFE: every run validates on the PathMNIST VAL split (disjoint from both
-# the 50k and the 90k superset, and from the hidden test) -- so internal/external
-# numbers are comparable and uncontaminated. NEVER touches the test split. Requires
-# external data to be rules-permitted (see plans/IF_external_data_allowed.txt).
+# Trains on the full provided 50k; validates leakage-free on the PathMNIST VAL
+# split (disjoint from the 50k) so selection stays honest. Each run also does the
+# strong CE+DLR eval every 10 epochs (-> best-by-true-robustness <out>.strong.pt).
 #
-# Prereq:  bash cluster/fetch_pathmnist.sh        (login node, once)
-# Rank after (MUST pass --extra-data so external models are scored on the clean val):
-#   python -m scripts.analyze_trends --glob "runlogs/sweep_*.out"
-#   python -m scripts.rank_robust --glob "checkpoints/sweep_*.pt" --arch resnet50 --extra-data data/pathmnist.npz
+# Rank after (MUST pass --extra-data so val is the clean PathMNIST split):
+#   python -m scripts.analyze_trends  --glob "runlogs/sweep_*.out"
+#   python -m scripts.rank_robust     --glob "checkpoints/sweep_*.pt" --arch resnet50 --extra-data data/pathmnist.npz
+#   python -m scripts.eval_on_provided --glob "checkpoints/sweep_*.pt" --arch resnet50   # test-preprocessing reference
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CODE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 cd "$CODE_DIR"
 
-EPOCHS="${EPOCHS:-200}"
+EPOCHS="${EPOCHS:-300}"
+# Peak LR 0.05 (down from 0.1); no --min-lr => cosine anneals fully to 0.
 BASE="--arch resnet50 --epochs ${EPOCHS} --method pgd --optimizer sgd --weight-decay 1e-3 \
---ema-decay 0.999 --dropout 0 --label-smoothing 0 --grad-clip 5.0 --warmup 5 \
---min-lr 0.005 --strong-eval-every 10 --extra-data data/pathmnist.npz"
+--ema-decay 0.999 --label-smoothing 0 --grad-clip 5.0 --warmup 5 --lr 0.05 --steps 7 \
+--strong-eval-every 10 --extra-data data/pathmnist.npz"
 
-# name | knob args.  Internal trains on the provided 50k; ext_* adds --extra-train (90k).
+# name | knob args (all steps-7 PGD-AT on the full 50k).
 CONFIGS=(
-  "pgd200_s7|--steps 7"
-  "pgd200_s10|--steps 10"
-  "pgd200_s15|--steps 15"
-  "ext_pgd200_s7|--steps 7 --extra-train"
-  "ext_pgd200_s10|--steps 10 --extra-train"
-  "ext_pgd200_s15|--steps 15 --extra-train"
+  "pgd250_s1|--seed 1"
+  "pgd250_s2|--seed 2"
+  "pgd250_s3|--seed 3"
+  "pgd250_drop05|--seed 1 --dropout 0.05"
 )
 
 mkdir -p checkpoints runlogs
-echo "launching ${#CONFIGS[@]} jobs (resnet50, ${EPOCHS} epochs, min-lr 0.005; 1 GPU each)"
+echo "launching ${#CONFIGS[@]} jobs (resnet50, ${EPOCHS} epochs, peak-lr 0.05, cosine->0; 1 GPU each)"
 for entry in "${CONFIGS[@]}"; do
   name="${entry%%|*}"
   extra="${entry#*|}"
