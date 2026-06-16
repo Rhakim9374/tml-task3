@@ -3,11 +3,11 @@
 #
 # Recipe (the winning configuration from our sweeps):
 #   - PGD adversarial training (Madry et al.), L-inf eps = 8/255, 7 inner steps
-#   - resnet50, trained from scratch on the provided 50k (no external data)
+#   - resnet50, trained from scratch on the provided 50k
 #   - 300 epochs, SGD + momentum, cosine LR from peak 0.05 -> 0 after 5-ep warmup
 #   - weight decay 1e-3, EMA 0.999, dropout 0.05, gradient clipping
-#   - always-on D4 augmentation (flip + 90-deg rotation), suited to the
-#     orientation-invariant histopathology images
+#   - always-on D4 augmentation (flip + 90-deg rotation), valid when the
+#     classes have no canonical orientation
 #
 # Trains on the provided 50k only; the best-by-score checkpoint is selected on a
 # fixed 10% held-out validation split and saved to checkpoints/best.pt -- already

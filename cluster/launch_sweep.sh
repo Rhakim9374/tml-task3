@@ -9,13 +9,9 @@
 # always-on D4 augmentation. Each run also runs a strong CE+DLR eval every 10
 # epochs, saving a best-by-true-robustness <out>.strong.pt next to <out>.pt.
 #
-# External-data ablation (negative result -- 90k PathMNIST gave no gain): add
-# `--extra-data data/pathmnist.npz --extra-train` to BASE (see fetch_pathmnist.sh).
-#
 # Rank after:
-#   python -m scripts.analyze_trends   --glob "runlogs/sweep_*.out"
-#   python -m scripts.rank_robust      --glob "checkpoints/sweep_*.pt" --arch resnet50
-#   python -m scripts.eval_on_provided --glob "checkpoints/sweep_*.pt" --arch resnet50
+#   python -m scripts.analyze_trends --glob "runlogs/sweep_*.out"
+#   python -m scripts.rank_robust    --glob "checkpoints/sweep_*.pt" --arch resnet50
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

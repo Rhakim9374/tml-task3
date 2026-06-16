@@ -18,10 +18,10 @@ scratch on the provided 50k:
 | objective | PGD-AT, `eps = 8/255`, `alpha = 2/255`, 7 inner steps |
 | schedule | 300 epochs, SGD + momentum, cosine LR `0.05 → 0` after 5-epoch warmup |
 | regularization | weight decay `1e-3`, EMA `0.999`, dropout `0.05`, grad-clip `5.0` |
-| augmentation | always-on D4 (random flip + 90° rotation) — the images are orientation-invariant histopathology |
+| augmentation | always-on D4 (random flip + 90° rotation) — the classes have no canonical orientation |
 | selection | best-by-score checkpoint on a fixed 10% held-out validation split |
 
-Trained on the provided 50k only (no external data, no pretrained weights).
+Trained from scratch on the provided 50k.
 
 ## Recreate it
 
@@ -76,10 +76,9 @@ scripts/
   evaluate.py         CLI: clean/robust/score + submission shape check for one checkpoint
   rank_robust.py      CLI: rank checkpoints by worst-case of PGD-20 and the strong attack
   analyze_trends.py   CLI: per-run eval trajectories (both attacks) from training logs
-  eval_on_provided.py CLI: score checkpoints on the provided 50k (test-preprocessing reference)
   submit.py           CLI: POST a .pt state dict to the leaderboard (key from TML_API_KEY)
 cluster/
-  fetch_data.sh / fetch_pathmnist.sh   download the provided 50k / PathMNIST (ablation)
+  fetch_data.sh                        download the provided 50k (train.npz)
   train.sub / run_train.sh             HTCondor template + in-container entrypoint
   launch_best.sh                       reproduce the best model (this recipe)
   launch_sweep.sh                      the seed + dropout sweep that found it
@@ -87,5 +86,5 @@ cluster/
 ```
 
 `src/train.py` exposes every objective and technique we explored (PGD-AT, TRADES,
-MART, SAM, AdvProp dual-BN, AWP, EMA, eps-warmup, an external-data option) behind
-CLI flags, so each experiment in the report is reproducible by setting flags.
+MART, SAM, AdvProp dual-BN, AWP, EMA, eps-warmup) behind CLI flags, so each
+experiment in the report is reproducible by setting flags.

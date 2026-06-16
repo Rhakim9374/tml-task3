@@ -38,50 +38,6 @@ def get_datasets(path: str, val_frac: float = 0.1, seed: int = 0):
     return train_ds, val_ds
 
 
-def _resize_to_32(x: torch.Tensor) -> torch.Tensor:
-    """Bilinear-resize (N,3,H,W) in [0,1] to 32x32, chunked to bound peak memory."""
-    if x.shape[-1] == 32 and x.shape[-2] == 32:
-        return x
-    out = [F.interpolate(x[i:i + 8192], size=32, mode="bilinear", align_corners=False)
-           for i in range(0, x.size(0), 8192)]
-    return torch.cat(out)
-
-
-def load_pathmnist(path: str, split: str) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Load a PathMNIST split from the MedMNIST npz as [0,1] (N,3,32,32) images.
-
-    PathMNIST stores (N,28,28,3) uint8 per split; we channel-first it, scale to
-    [0,1], and bilinear-resize 28->32 to match the provided data's preprocessing
-    (the given 50k is PathMNIST resized to 32). Labels are (N,1) -> (N,), already
-    in the same 0-8 encoding as the task.
-    """
-    data = np.load(path)
-    imgs = torch.from_numpy(data[f"{split}_images"]).permute(0, 3, 1, 2).float() / 255.0
-    labels = torch.from_numpy(data[f"{split}_labels"].reshape(-1)).long()
-    return _resize_to_32(imgs), labels
-
-
-def get_datasets_pathmnist(extra_path, provided_path="data/train.npz", use_extra_train=False, seed=0):
-    """Datasets for the external-data experiments -- leakage-free and comparable.
-
-    Validation = the PathMNIST VAL split: disjoint from both the provided 50k and
-    the 90k train superset (and from the hidden PathMNIST TEST), so it is a clean
-    selection set usable for internal AND external runs alike. Training = the
-    PathMNIST TRAIN split (89,996; supersedes our 50k) when ``use_extra_train``,
-    else the full provided 50k. ``seed`` is unused (the splits are the official
-    MedMNIST ones) but kept for call-site symmetry.
-
-    Only ever touches train/val, never the test split -- see the leakage policy in
-    plans/IF_external_data_allowed.txt. Requires external data to be rules-permitted.
-    """
-    val_x, val_y = load_pathmnist(extra_path, "val")
-    if use_extra_train:
-        tr_x, tr_y = load_pathmnist(extra_path, "train")
-    else:
-        tr_x, tr_y = load_npz(provided_path)
-    return TensorDataset(tr_x, tr_y), TensorDataset(val_x, val_y)
-
-
 def make_loader(ds, batch_size: int = 256, shuffle: bool = False, num_workers: int = 4) -> DataLoader:
     return DataLoader(
         ds,
@@ -95,8 +51,8 @@ def make_loader(ds, batch_size: int = 256, shuffle: bool = False, num_workers: i
 
 def random_d4_rotate(x: torch.Tensor) -> torch.Tensor:
     """Per-sample random 90-degree rotation. Combined with the horizontal flip in
-    ``augment`` this realizes the full D4 dihedral symmetry -- appropriate for
-    histopathology, which has no canonical orientation. Lossless (no interpolation)."""
+    ``augment`` this realizes the full D4 dihedral symmetry -- valid when the classes
+    have no canonical orientation. Lossless (no interpolation)."""
     b = x.size(0)
     k = torch.randint(0, 4, (b,), device=x.device)
     out = x.clone()
@@ -110,8 +66,8 @@ def random_d4_rotate(x: torch.Tensor) -> torch.Tensor:
 def color_jitter(x: torch.Tensor, strength: float) -> torch.Tensor:
     """Per-sample brightness / contrast / per-channel gain jitter (in [0,1]).
 
-    A cheap stain-variation proxy for H&E images: the per-channel gain mimics
-    staining-intensity differences across slides. ``strength`` <= 0 is a no-op.
+    A cheap proxy for global colour and illumination variation; the per-channel
+    gain perturbs the colour balance. ``strength`` <= 0 is a no-op.
     """
     if not strength or strength <= 0:
         return x
@@ -121,7 +77,7 @@ def color_jitter(x: torch.Tensor, strength: float) -> torch.Tensor:
         return torch.rand(b, 1, 1, 1, device=dev) * (hi - lo) + lo
 
     x = x * factor(1 - s, 1 + s)                                   # brightness
-    x = x * ((torch.rand(b, 3, 1, 1, device=dev) * 2 - 1) * s + 1)  # per-channel (stain) gain
+    x = x * ((torch.rand(b, 3, 1, 1, device=dev) * 2 - 1) * s + 1)  # per-channel colour gain
     mean = x.mean(dim=(1, 2, 3), keepdim=True)
     x = (x - mean) * factor(1 - s, 1 + s) + mean                  # contrast
     return x.clamp(0.0, 1.0)
@@ -149,11 +105,11 @@ def cutout(x: torch.Tensor, size: int) -> torch.Tensor:
 
 
 def augment(x: torch.Tensor, pad: int = 4, cutout_size: int = 0, jitter: float = 0.0) -> torch.Tensor:
-    """Batched train-time augmentation for histopathology, on (B,3,32,32) in [0,1].
+    """Batched train-time augmentation on (B,3,32,32) in [0,1].
 
-    Always applies the D4 symmetry (random h-flip + random 90-degree rotation,
-    valid because tissue patches have no canonical orientation) and a reflect-pad
-    random crop. ``jitter`` > 0 adds stain/color jitter; ``cutout_size`` > 0 erases
+    Always applies the D4 symmetry (random h-flip + random 90-degree rotation),
+    valid when the classes have no canonical orientation, plus a reflect-pad
+    random crop. ``jitter`` > 0 adds colour jitter; ``cutout_size`` > 0 erases
     a random square. Returns the same shape.
     """
     b, c, h, w = x.shape

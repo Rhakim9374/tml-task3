@@ -2,8 +2,8 @@
 .claude/
 CLAUDE.md
 
-# Class materials — not needed at runtime, not committed
-ProjectDescriptions/
+# Materials — not needed at runtime, not committed
+Relevant/
 
 # Reference copies pulled from HuggingFace (kept locally for convenience)
 reference/
